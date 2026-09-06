@@ -59,7 +59,20 @@ internal sealed class SettingsWindow : Window
         foreach (var l in new[] { "auto", "en", "es", "fr", "de", "it", "pt", "ja", "ko", "zh", "hi", "ar" }) language.Items.Add(l);
         language.SelectedItem = settings.Language; if (language.SelectedIndex < 0) language.SelectedIndex = 0; stack.Children.Add(language);
         Label(stack, "Optional AI cleanup"); cleanup.IsChecked = settings.CleanupEnabled; stack.Children.Add(cleanup);
-        foreach (var p in new[] { "auto", "claude", "codex", "gemini", "kimi", "opencode", "anthropic", "openai", "grok", "custom", "none" }) provider.Items.Add(p);
+        foreach (var option in new[] {
+            new ProviderOption("auto", "Automatic (installed CLI)"),
+            new ProviderOption("claude", "Claude CLI (existing login)"),
+            new ProviderOption("codex", "Codex CLI (existing login)"),
+            new ProviderOption("gemini-cli", "Gemini CLI (existing login)"),
+            new ProviderOption("gemini", "Gemini API"),
+            new ProviderOption("kimi", "Kimi API"),
+            new ProviderOption("opencode", "OpenCode API"),
+            new ProviderOption("anthropic", "Anthropic API"),
+            new ProviderOption("openai", "OpenAI API"),
+            new ProviderOption("grok", "Grok API"),
+            new ProviderOption("custom", "Custom API"),
+            new ProviderOption("none", "None (plain dictation)")
+        }) provider.Items.Add(option);
         JsonNode? ai = null;
         try { ai = JsonNode.Parse(File.ReadAllText(aiConfigPath))?["ai"]; } catch (Exception e) when (e is IOException or System.Text.Json.JsonException or InvalidOperationException) { }
         string ReadAi(string key, string fallback)
@@ -67,11 +80,12 @@ internal sealed class SettingsWindow : Window
             try { return ai?[key]?.GetValue<string>() ?? fallback; }
             catch (Exception e) when (e is InvalidOperationException or FormatException) { return fallback; }
         }
-        provider.SelectedItem = ReadAi("provider", "auto");
-        if (provider.SelectedIndex < 0) provider.SelectedItem = "auto";
+        provider.SelectedItem = provider.Items.Cast<ProviderOption>().FirstOrDefault(option => option.Id == ReadAi("provider", "auto")) ?? provider.Items[0];
         model.Text = ReadAi("model", "economy");
+        provider.SelectionChanged += (_, _) => model.Text = "economy";
         stack.Children.Add(provider); stack.Children.Add(new TextBlock { Text = "Model", Margin = new Thickness(0, 7, 0, 3) }); stack.Children.Add(model);
-        stack.Children.Add(Description("Auto uses a supported CLI already signed in on this PC. AI account limits and charges still apply. API providers require an explicitly configured endpoint and an environment variable for the key. Sona does not store credentials."));
+        stack.Children.Add(Description("Auto uses installed Claude or Codex. Gemini CLI uses your installed CLI's existing login and may keep its own local session history. Gemini API uses an API key. Account limits or charges still apply. Sona does not sign you in or store credentials."));
+        stack.Children.Add(Description("Leave Model as economy for the provider's lightweight default, or enter a model ID. Open AI configuration for a custom executable, endpoint, or API key environment-variable name."));
         var advanced = new Button { Content = "Open AI configuration", HorizontalAlignment = HorizontalAlignment.Left };
         advanced.Click += (_, _) =>
         {
@@ -79,9 +93,9 @@ internal sealed class SettingsWindow : Window
             Process.Start(new ProcessStartInfo("notepad.exe") { UseShellExecute = false, ArgumentList = { aiConfigPath } });
         }; stack.Children.Add(advanced);
         Label(stack, "Node executable (optional override)"); node.Text = settings.NodePath ?? ""; stack.Children.Add(node);
-        stack.Children.Add(Description("The installer includes Node for the shared cleanup bridge. An existing Node 20+ installation can also be used."));
+        stack.Children.Add(Description("The installer includes Node for the shared cleanup bridge. An existing Node 20+ installation can also be used; Gemini CLI requires Node 24+."));
         login.IsChecked = settings.StartAtLogin; login.Margin = new Thickness(0, 12, 0, 10); stack.Children.Add(login);
-        stack.Children.Add(Description("First setup downloads the verified multilingual Whisper base model, about 148 MB. The model stays in your local Sona folder. Recordings and transcripts are kept in memory, not written to a history."));
+        stack.Children.Add(Description("First setup downloads the verified multilingual Whisper base model, about 148 MB. The model stays in your local Sona folder. Sona keeps recordings and the last transcript in memory. Selected AI providers have their own retention policies."));
         stack.Children.Add(progress); stack.Children.Add(status); stack.Children.Add(save);
         var cancelSetup = new Button { Content = "Cancel setup download", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 8, 0, 0) };
         cancelSetup.Click += (_, _) => setupCancellation?.Cancel(); stack.Children.Add(cancelSetup);
@@ -132,7 +146,7 @@ internal sealed class SettingsWindow : Window
                 MicrophoneId = (devices.SelectedItem as DeviceOption)?.Id, Language = language.SelectedItem as string ?? "auto",
                 NodePath = node.Text, StartAtLogin = login.IsChecked == true
             };
-            await apply(next.Validate(), provider.SelectedItem as string ?? "auto", model.Text.Trim(), new Progress<double>(p =>
+            await apply(next.Validate(), (provider.SelectedItem as ProviderOption)?.Id ?? "auto", model.Text.Trim(), new Progress<double>(p =>
             {
                 progress.Value = p; status.Text = $"Preparing the local speech model… {p:P0}";
             }), setupCancellation.Token);
@@ -142,5 +156,6 @@ internal sealed class SettingsWindow : Window
         catch (Exception e) { status.Text = e.Message; }
         finally { preparing = false; save.IsEnabled = true; setupCancellation?.Dispose(); setupCancellation = null; }
     }
+    private sealed record ProviderOption(string Id, string Label) { public override string ToString() => Label; }
     private sealed record DeviceOption(string? Id, string Name) { public override string ToString() => Name; }
 }

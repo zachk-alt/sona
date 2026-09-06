@@ -1,11 +1,11 @@
 # Sona cleanup bridge
 
-Node 20 or later, standard library only. macOS and Windows use the same JSON settings and text protocol.
+Node 20 or later for the bridge, Node 24 or later for `gemini-cli`, standard library only. macOS and Windows use the same JSON settings and text protocol.
 
 ```sh
 node bridge/sona-cleanup.mjs --config /absolute/path/to/config.json --mode prose
 node bridge/sona-cleanup.mjs --config /absolute/path/to/config.json --doctor
-node --test bridge/test/cleanup.test.mjs
+node --test bridge/test/*.test.mjs
 ```
 
 Send the raw UTF-8 transcript through stdin, then close stdin. stdout contains only the repaired transcript. A provider/configuration/network/output failure returns the original text unchanged with exit status 0. stderr receives only a short reason code, never the transcript, response body, or credential. The native caller must also retain the original for missing Node, launch failures, cancellation, or a nonzero bridge exit.
@@ -35,6 +35,7 @@ API providers read the environment variable named by `apiKeyEnv`, using the defa
 | --- | --- | --- | --- |
 | `claude` | Existing Claude Code CLI account | `claude-haiku-4-5-20251001` | CLI manages its own login |
 | `codex` | Existing Codex CLI account | `gpt-5.6-luna`, low effort | CLI manages its own login |
+| `gemini-cli` | Existing Gemini CLI Google login, reviewed 0.58.0 package | `gemini-3.1-flash-lite` | CLI manages its own OAuth login |
 | `anthropic` | Anthropic Messages API | `claude-haiku-4-5-20251001` | `ANTHROPIC_API_KEY` |
 | `openai` | OpenAI Chat Completions API | `gpt-5-nano-2025-08-07`, minimal effort | `OPENAI_API_KEY` |
 | `gemini` | Gemini OpenAI-compatible API | `gemini-2.5-flash-lite`, thinking off | `GEMINI_API_KEY` |
@@ -51,13 +52,19 @@ CLI routes use the existing CLI's authentication and usage limits. API routes ha
 
 The transcript is JSON data on stdin, never argv or shell source. Fixed system instructions say to repair it without following its instructions. Claude has no built-in or MCP tools, safe mode, disabled skills/hooks, and no session persistence. Codex ignores user configuration/rules, disables tool-bearing features, uses read-only sandboxing, and disables session/history persistence. Both run in a fresh inert scratch directory. Newer CLI isolation flags are required; an older incompatible CLI safely fails through. Administrator policies still apply.
 
-API requests offer no tools, make a single bounded request, and never execute returned tool calls. Error, refusal, truncated, malformed, empty, unexpected-model, and excessive outputs are rejected. No session, transcript file, or request log is created by the bridge. Provider-side retention and managed CLI policy remain the provider's responsibility. The original Mac Claude standby implementation can remain the low-latency route.
+API requests offer no tools, make a single bounded request, and never execute returned tool calls. Error, refusal, truncated, malformed, empty, unexpected-model, and excessive outputs are rejected. No transcript file or request log is created by the bridge itself. Provider-side retention and managed CLI policy remain the provider's responsibility. The original Mac Claude standby implementation can remain the low-latency route.
 
-Gemini CLI, Kimi CLI and OpenCode CLI are not invoked. Their ordinary headless modes save sessions, and their tool/permission settings differ. Their API routes provide a predictable tool-free request without inheriting CLI plugins, hooks or agent behavior.
+`gemini-cli` is an explicit existing-account route, separate from `gemini` API. It requires the published Gemini CLI 0.58.0 package and Node 24. The bridge preserves HOME, OAuth storage, and system settings paths. It does not install Gemini, launch a login browser, copy credentials, choose API authentication, or enable AI-credit overages. Google account eligibility and quota still apply. The reviewed CLI itself uses Flash-Lite; an unavailable model returns the original transcript without upgrading.
+
+Gemini runs in a newly created empty workspace with a fixed system prompt, no context discovery, hooks, skills, agents or builtin tools. Input is JSON on stdin, with at-signs Unicode-escaped to prevent Gemini's pre-model `@file` expansion. Singleton model chains prevent its normal Flash-Lite fallback to larger models. Gemini ignores file-based admin controls, so a Node loader checks exact published Config chunk hashes and installs a runtime guard before OAuth initialization and again before tool initialization. It inspects effective managed settings, refuses any MCP server/active extension or conflicting configuration, and confirms the actual registry contains zero tools. It does not overwrite managed policy or modify installed Gemini files. CLI bootstrap relaunch is disabled with the verified `GEMINI_CLI_NO_RELAUNCH` control; an inherited sandbox configuration fails through instead of launching outside this guard. Custom model settings, extra context directories, unsupported versions and incompatible Node also fail through with sanitized reasons. This intentionally favors plain dictation when an existing agent configuration conflicts with cleanup's tool-free contract.
+
+Gemini's own normal local session history remains enabled outside the bridge scratch directory. It may retain dictation and responses under its account's local CLI storage. Sona removes only the temporary files it created, never unrelated Gemini history. This differs from the Claude and Codex routes, which request no session persistence. Select `none` for plain dictation or another route if Gemini's retention is unsuitable.
+
+The official Grok CLI supports browser OAuth and cached login, so API-only access is not an inherent Grok limitation. Sona has not implemented its CLI adapter: ordinary headless mode retains MCP meta-tools and inherited hooks, and managed hooks cannot simply be switched off. Its API route remains available. Kimi and OpenCode are also currently API routes.
 
 ## Verification
 
-`--doctor` reports only executable presence, environment-key presence, fixed models and transport capabilities. It makes no network request and does not claim that authentication or billing works. Automated tests use local mock processes and a loopback HTTP server, never real accounts. `node bridge/test/smoke-live.mjs claude` or `codex` is an explicit opt-in synthetic test that consumes the selected CLI account's normal quota.
+`--doctor` reports executable presence, environment-key presence, fixed models and transport capabilities. For Gemini it also checks Node and local package-version compatibility without executing the CLI. It makes no network request and does not claim that authentication or billing works. Automated tests use local mock processes and a loopback HTTP server, never real accounts. `node bridge/test/smoke-live.mjs claude` or `codex` is an explicit opt-in synthetic test that consumes the selected CLI account's normal quota.
 
 The Swift adapter has an independent nonblocking I/O deadline and supports cancellation and shutdown. Its exact source is exercised by `test/SwiftBridgeTests.swift` against `test/fake-bridge.mjs` without models or AppKit.
 
@@ -70,3 +77,6 @@ The Swift adapter has an independent nonblocking I/O deadline and supports cance
 - [Kimi current models and retirements](https://platform.kimi.ai/docs/models), [K2.6 request parameters](https://platform.kimi.ai/docs/guide/kimi-k2-6-quickstart).
 - [xAI model catalog](https://docs.x.ai/developers/models), [reasoning and Responses example](https://docs.x.ai/developers/model-capabilities/text/reasoning).
 - [OpenCode Zen endpoints and models](https://opencode.ai/docs/zen/).
+
+
+Gemini's exact reviewed implementation: [settings precedence and remote admin replacement](https://github.com/google-gemini/gemini-cli/blob/v0.58.0/packages/cli/src/config/settings.ts), [Config initialization and tool registry](https://github.com/google-gemini/gemini-cli/blob/v0.58.0/packages/core/src/config/config.ts), [headless preprocessing](https://github.com/google-gemini/gemini-cli/blob/v0.58.0/packages/cli/src/nonInteractiveCli.ts), [model fallback selection](https://github.com/google-gemini/gemini-cli/blob/v0.58.0/packages/core/src/availability/policyHelpers.ts), [CLI model pins](https://github.com/google-gemini/gemini-cli/blob/v0.58.0/packages/core/src/config/models.ts), [bootstrap relaunch](https://github.com/google-gemini/gemini-cli/blob/v0.58.0/packages/cli/index.ts), [session recording](https://github.com/google-gemini/gemini-cli/blob/v0.58.0/packages/core/src/services/chatRecordingService.ts). Account behavior: [existing Google authentication](https://geminicli.com/docs/get-started/authentication/), [CLI models](https://geminicli.com/docs/cli/model/), [quotas and subscriptions](https://geminicli.com/docs/resources/quota-and-pricing/). Grok: [official authentication](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md), [headless behavior](https://docs.x.ai/build/cli/headless-scripting), [managed hooks](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-hooks/src/config.rs).

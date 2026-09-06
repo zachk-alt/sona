@@ -54,11 +54,12 @@ It downloads the matching release, checks its SHA-256, installs a private Node r
 | --- | --- |
 | Claude | Your installed, signed-in Claude Code CLI; Haiku economy default |
 | ChatGPT / Codex | Your installed, signed-in Codex CLI; Luna economy default |
-| Gemini, Grok, Kimi, OpenAI, Anthropic, OpenCode | Their API, using your own API environment variable |
+| Gemini CLI | Your installed, signed-in Gemini CLI, selected with `gemini-cli` |
+| Gemini API, Grok, Kimi, OpenAI, Anthropic, OpenCode | Their API, using your own API environment variable |
 | Custom | An OpenAI-compatible endpoint and explicit model ID, including a local server |
 | None | Plain, local dictation with no AI request |
 
-Automatic mode selects an installed Claude or Codex CLI. It never silently chooses a paid API. API accounts are separate from chat subscriptions. No app can turn one company's subscription into access to all companies' models. Sona does not extract credentials or install/login to AI clients on your behalf.
+Automatic mode selects an installed Claude or Codex CLI. It never silently chooses a paid API. API accounts are separate from chat subscriptions. No app can turn one company's subscription into access to all companies' models. Sona does not extract credentials or install/login to AI clients on your behalf. Gemini CLI is a separate explicit choice, `gemini-cli`; the existing `gemini` choice continues to use the API. Grok has an official CLI, but this release uses its API while a separate CLI adapter is being verified.
 
 The reviewed model catalog, environment variable names, request isolation and configuration schema live in [bridge/README.md](bridge/README.md). Economy is a fixed small or low-effort choice where available, not a live price optimizer. An unavailable model, timeout, invalid response or missing login falls back to the original local transcript. There is no automatic upgrade to a more expensive model.
 
@@ -95,7 +96,7 @@ Optional API settings use `apiKeyEnv` for the name of an environment variable, n
 
 Mac's Sound menu includes the Sona blend and installed system/instrument sounds. The blend loads Bottle and Purr from that Mac at runtime. Windows ships original synthesized companion sounds. Apple's sound files are not redistributed. The supplied Sona app icon is included on both platforms.
 
-Sona keeps recordings and transcripts in memory rather than saving a history. Local status logs do not contain transcript text. AI providers have their own retention and account policies. Read [PRIVACY.md](PRIVACY.md) and [SECURITY.md](SECURITY.md).
+Sona keeps recordings and transcripts in memory rather than saving a history. Local status logs do not contain transcript text. AI providers have their own retention and account policies. Gemini CLI can also retain its own local session history; Sona does not copy or publish that history. Read [PRIVACY.md](PRIVACY.md) and [SECURITY.md](SECURITY.md).
 
 ## Build and check
 

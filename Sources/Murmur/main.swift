@@ -13,6 +13,18 @@ let arguments = CommandLine.arguments
 
 if arguments.contains("--insertion-selftest") { MainActor.assumeIsolated { InsertionSelfTest.run() } }
 
+// Read-only destination diagnosis. Never prints field contents or document names.
+if arguments.contains("--focus-diagnostic") {
+    _ = NSApplication.shared
+    FocusedElement.beginTrackingActivity { _ in false }
+    let before = FocusedElement.captureTarget()
+    RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.4))
+    let after = FocusedElement.captureTarget()
+    print("focus-diagnostic: trusted=\(AXIsProcessTrusted()) concrete=\(before?.element != nil) window=\(before?.window != nil || before?.windowID != nil) activity=\(before?.activity != nil) blocked=\(before?.blocked ?? false) match=\(FocusedElement.match(before, after).rawValue)")
+    FocusedElement.endTrackingActivity()
+    exit(0)
+}
+
 /// Runs an async CLI mode to completion, then exits with its status.
 func runCommand(_ body: @escaping () async -> Int32) -> Never {
     Task { exit(await body()) }
@@ -31,7 +43,14 @@ if arguments.contains("--configure") {
         config.hotkey = binding.name
     }
     if let provider = option("--provider") {
-        guard ["auto","none","claude","codex","gemini","kimi","grok","openai","anthropic","opencode","custom"].contains(provider) else { fputs("Unknown provider.\n",stderr); exit(1) }
+        guard ["auto","none","claude","codex","gemini-cli","gemini","kimi","grok","openai","anthropic","opencode","custom"].contains(provider) else { fputs("Unknown provider.\n",stderr); exit(1) }
+        if config.ai.provider != provider {
+            config.ai.model = "economy"
+            config.ai.executable = nil
+            config.ai.args = nil
+            config.ai.endpoint = nil
+            config.ai.apiKeyEnv = nil
+        }
         config.ai.provider = provider
     }
     if let model = option("--model") { config.ai.model = model }

@@ -32,6 +32,9 @@ internal static class WindowsSelfTest
             panel.Close();
             string bridge = Path.Combine(AppContext.BaseDirectory, "bridge", "sona-cleanup.mjs");
             Check("bridge_packaged", File.Exists(bridge));
+            Check("gemini_cli_helper_packaged", File.Exists(Path.Combine(AppContext.BaseDirectory, "bridge", "gemini-cli.mjs")));
+            Check("gemini_cli_launcher_packaged", File.Exists(Path.Combine(AppContext.BaseDirectory, "bridge", "gemini-launch.mjs")));
+            Check("gemini_cli_loader_packaged", File.Exists(Path.Combine(AppContext.BaseDirectory, "bridge", "gemini-loader.mjs")));
             if (fixture != null)
             {
                 using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(8) };

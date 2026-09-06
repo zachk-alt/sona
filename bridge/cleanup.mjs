@@ -4,6 +4,7 @@ import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { GEMINI_MODEL, GEMINI_VERSION, geminiInput, geminiVersion, parseGeminiOutput, prepareGemini } from './gemini-cli.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 export const MAX_INPUT = 64 * 1024;
@@ -11,6 +12,7 @@ const MAX_RESPONSE = 1024 * 1024;
 export const PROVIDERS = Object.freeze({
   claude: { transport: 'cli', model: 'claude-haiku-4-5-20251001', executable: 'claude' },
   codex: { transport: 'cli', model: 'gpt-5.6-luna', executable: 'codex' },
+  'gemini-cli': { transport: 'cli', model: GEMINI_MODEL, executable: 'gemini' },
   anthropic: { transport: 'anthropic', model: 'claude-haiku-4-5-20251001', endpoint: 'https://api.anthropic.com/v1/messages', apiKeyEnv: 'ANTHROPIC_API_KEY' },
   openai: { transport: 'compatible', model: 'gpt-5-nano-2025-08-07', endpoint: 'https://api.openai.com/v1/chat/completions', apiKeyEnv: 'OPENAI_API_KEY' },
   gemini: { transport: 'compatible', model: 'gemini-2.5-flash-lite', endpoint: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', apiKeyEnv: 'GEMINI_API_KEY' },
@@ -67,7 +69,8 @@ export async function resolveCLI(provider, config = {}, env = process.env) {
     if (/\.cmd$/iu.test(candidate)) {
       // Do not invoke cmd.exe or interpolate shell text. Npm's documented Windows
       // package layouts can be launched directly by Node instead of a batch shim.
-      const relative = provider === 'codex' ? '@openai/codex/bin/codex.js' : '@anthropic-ai/claude-code/cli.js';
+      const relative = provider === 'codex' ? '@openai/codex/bin/codex.js' : provider === 'gemini-cli'
+        ? '@google/gemini-cli/bundle/gemini.js' : '@anthropic-ai/claude-code/cli.js';
       const script = path.join(path.dirname(candidate), 'node_modules', relative);
       try { await access(script); return { command: process.execPath, prefix: [script] }; } catch { continue; }
     }
@@ -316,9 +319,23 @@ export async function cleanup(original, rawConfig = {}, { mode = 'prose', env = 
     if (selected.launch) {
       const scratch = await mkdtemp(path.join(tmpdir(), 'sona-cleanup-'));
       try {
-        result = parseCLIOutput(selected.provider, await runProcess(selected.launch,
-          cliArguments(selected.provider, selected.model, mode, system, scratch), input,
-          { env, cwd: scratch, signal, timeoutMs: config.timeoutMs }));
+        if (selected.provider === 'gemini-cli') {
+          const deadline = Date.now() + config.timeoutMs;
+          let prepared;
+          try { prepared = await prepareGemini(selected.launch, selected.model, scratch, system, env); }
+          catch (error) { throw new BridgeError(error.code?.startsWith('gemini_') ? error.code : 'gemini_prepare_failed'); }
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) fail('timeout');
+          const output = await runProcess(prepared.launch, prepared.args, geminiInput(input),
+            { env: prepared.env, cwd: scratch, signal, timeoutMs: remaining });
+          if (await readFile(path.join(scratch, 'guard-applied'), 'utf8').catch(() => '') !== 'verified') fail('gemini_guard_not_applied');
+          try { result = parseGeminiOutput(output, selected.model); }
+          catch (error) { throw new BridgeError(error.code ?? 'invalid_response'); }
+        } else {
+          result = parseCLIOutput(selected.provider, await runProcess(selected.launch,
+            cliArguments(selected.provider, selected.model, mode, system, scratch), input,
+            { env, cwd: scratch, signal, timeoutMs: config.timeoutMs }));
+        }
       } finally {
         // Only this invocation's newly created scratch directory is removed.
         await rm(scratch, { recursive: true, force: true }).catch(() => {});
@@ -333,18 +350,26 @@ export async function cleanup(original, rawConfig = {}, { mode = 'prose', env = 
 
 export async function doctor(rawConfig = {}, env = process.env) {
   const config = parseConfig(rawConfig);
-  const providers = await Promise.all(Object.entries(PROVIDERS).map(async ([id, value]) => ({
+  const providers = await Promise.all(Object.entries(PROVIDERS).map(async ([id, value]) => {
+    const launch = value.transport === 'cli' ? await resolveCLI(id, config.provider === id ? config : {}, env) : null;
+    let version, compatibilityReason;
+    if (id === 'gemini-cli' && launch) {
+      try { version = await geminiVersion(launch); } catch (error) { compatibilityReason = error.code; }
+    }
+    return {
     id, transport: value.transport === 'cli' ? 'CLI account' : 'API (provider billing may apply)',
     economyModel: value.model ?? null,
-    available: value.transport === 'cli' ? Boolean(await resolveCLI(id, config.provider === id ? config : {}, env)) :
+    available: value.transport === 'cli' ? Boolean(launch) && !compatibilityReason :
       Boolean(env[config.provider === id ? config.apiKeyEnv ?? value.apiKeyEnv : value.apiKeyEnv]),
     authenticationTested: false,
-  })));
+    ...(id === 'gemini-cli' ? { installed: Boolean(launch), requiredVersion: GEMINI_VERSION, version, compatibilityReason } : {}),
+  }; }));
   return { nodeVersion: process.versions.node, supportedNode: Number(process.versions.node.split('.')[0]) >= 20,
     configuredProvider: config.provider, configuredModel: config.model, timeoutMs: config.timeoutMs,
     autoOrder: ['claude', 'codex'], providers, notes: [
       'Read-only local availability check. No authentication or model request was made.',
-      'Gemini, Kimi, and OpenCode are explicit API adapters. Their agent CLIs are not invoked.',
+      'gemini-cli explicitly reuses an existing Google OAuth login on the reviewed CLI version; Gemini may retain local session history.',
+      'gemini, grok, Kimi, and OpenCode remain explicit API adapters. Grok CLI integration is not implemented.',
       'No automatic API selection or fallback to another model/provider. Plain text survives all failures.',
     ] };
 }

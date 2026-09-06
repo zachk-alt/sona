@@ -25,31 +25,90 @@ enum FocusedElement {
         let window: AXUIElement?
         let document: String?
         let windowTitle: String?
+        var windowID: CGWindowID? = nil
+        var activity: Activity? = nil
+        var blocked: Bool = false
+    }
+
+    struct Activity: Equatable {
+        let session: UUID
+        var revision: UInt64
+    }
+
+    private static var activity: Activity?
+    private static var activityMonitor: Any?
+    private static var activationMonitor: NSObjectProtocol?
+
+    /// Only active during a dictation. Keep an activity counter, never keys or text.
+    /// Global monitors exclude clicks in Sona's own nonactivating Done panel.
+    static func beginTrackingActivity(ignoringKey: @escaping (NSEvent) -> Bool) {
+        endTrackingActivity()
+        guard AXIsProcessTrusted() else { return }
+        activity = Activity(session: UUID(), revision: 0)
+        activityMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown, .keyDown]) { event in
+                if event.type == .keyDown && ignoringKey(event) { return }
+                activity?.revision &+= 1
+            }
+        activationMonitor = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { _ in
+                activity?.revision &+= 1
+            }
+    }
+
+    static func endTrackingActivity() {
+        if let activityMonitor { NSEvent.removeMonitor(activityMonitor) }
+        if let activationMonitor { NSWorkspace.shared.notificationCenter.removeObserver(activationMonitor) }
+        activityMonitor = nil
+        activationMonitor = nil
+        activity = nil
     }
 
     enum Match: String {
-        case same, applicationChanged, fieldChanged, windowChanged, documentChanged, unavailable
+        case same, applicationChanged, fieldChanged, windowChanged, documentChanged, activityChanged, blocked, unavailable
     }
 
-    static func captureTarget() -> Target? {
-        let focus = current()
+    static func captureTarget(focus suppliedFocus: Result? = nil) -> Target? {
+        let token = activityMonitor != nil && AXIsProcessTrusted() ? activity : nil
+        let focus = suppliedFocus ?? current()
         guard let pid = focus.pid, pid > 0 else { return nil }
-        guard let element = focus.element, isConcreteEditableField(element) else {
-            return Target(pid: pid, element: nil, window: nil, document: nil, windowTitle: nil)
-        }
-        let window = elementAttribute(element, kAXWindowAttribute)
-        let document = stringAttribute(element, kAXDocumentAttribute)
+        let element = focus.element
+        let appElement = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appElement, 0.2)
+        let window = element.flatMap { elementAttribute($0, kAXWindowAttribute) }
+            ?? elementAttribute(appElement, kAXFocusedWindowAttribute)
+        let document = element.flatMap { stringAttribute($0, kAXDocumentAttribute) }
             ?? window.flatMap { stringAttribute($0, kAXDocumentAttribute) }
         let title = window.flatMap { stringAttribute($0, kAXTitleAttribute) }
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return nil }
-        return Target(pid: pid, element: element, window: window, document: document, windowTitle: title)
+        return Target(pid: pid, element: element.flatMap { isConcreteEditableField($0) ? $0 : nil },
+                      window: window, document: document, windowTitle: title,
+                      windowID: frontWindowID(pid: pid), activity: token,
+                      blocked: element.map(isKnownNonEditableField) ?? false)
     }
 
     /// Pure identity comparison also used by the headless insertion tests.
     static func match(_ original: Target?, _ current: Target?) -> Match {
         guard let original, let current else { return .unavailable }
         guard original.pid == current.pid else { return .applicationChanged }
-        guard let before = original.element, let after = current.element else { return .unavailable }
+        guard !original.blocked, !current.blocked else { return .blocked }
+        guard let before = original.element, let after = current.element else {
+            // Some Electron editors expose no focused AX field at all. The same
+            // window and an uninterrupted user gesture still provide a usable
+            // paste destination. A click, key, or app switch invalidates it.
+            guard let activity = original.activity, let currentActivity = current.activity else { return .unavailable }
+            guard activity == currentActivity else { return .activityChanged }
+            if let before = original.windowID, let after = current.windowID {
+                guard before != 0, after != 0 else { return .unavailable }
+                guard before == after else { return .windowChanged }
+            } else {
+                guard let before = original.window, let after = current.window else { return .unavailable }
+                guard CFEqual(before, after) else { return .windowChanged }
+            }
+            if let before = original.window, let after = current.window, !CFEqual(before, after) { return .windowChanged }
+            guard original.document == current.document else { return .documentChanged }
+            return .same
+        }
         guard CFEqual(before, after) else { return .fieldChanged }
         switch (original.window, current.window) {
         case let (before?, after?):
@@ -57,10 +116,31 @@ enum FocusedElement {
         case (nil, nil): break
         default: return .unavailable
         }
-        guard original.document == current.document, original.windowTitle == current.windowTitle else {
-            return .documentChanged
-        }
+        guard original.document == current.document else { return .documentChanged }
+        if original.document == nil && original.windowTitle != current.windowTitle { return .documentChanged }
         return .same
+    }
+
+    /// Window metadata only. No screenshots, titles, or screen permission needed.
+    private static func frontWindowID(pid: pid_t) -> CGWindowID? {
+        guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] else { return nil }
+        for window in windows {
+            guard (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid,
+                  (window[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
+                  let number = (window[kCGWindowNumber as String] as? NSNumber)?.uint32Value, number != 0 else { continue }
+            return number
+        }
+        return nil
+    }
+
+    private static func isKnownNonEditableField(_ element: AXUIElement) -> Bool {
+        if stringAttribute(element, kAXSubroleAttribute) == "AXSecureTextField" { return true }
+        return ["AXStaticText", "AXSlider", "AXCheckBox", "AXRadioButton", "AXPopUpButton", "AXButton",
+                "AXMenuItem", "AXMenu", "AXMenuBar", "AXScrollBar", "AXImage", "AXLink", "AXTable",
+                "AXOutline", "AXRow", "AXCell", "AXList", "AXIncrementor", "AXDisclosureTriangle",
+                "AXToolbar", "AXTabGroup", "AXColorWell", "AXProgressIndicator"]
+            .contains(stringAttribute(element, kAXRoleAttribute) ?? "")
     }
 
     private static func isConcreteEditableField(_ element: AXUIElement) -> Bool {

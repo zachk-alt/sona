@@ -17,7 +17,7 @@ while [ $# -gt 0 ]; do
       esac
       shift 2;;
     --no-open) SONA_OPEN=0; shift;;
-    --help) echo 'Usage: ./install.sh [--hotkey right-command] [--provider auto|none|claude|codex|gemini|kimi|grok|openai|anthropic|opencode|custom] [--model economy|ID] [--no-open]'; exit 0;;
+    --help) echo 'Usage: ./install.sh [--hotkey right-command] [--provider auto|none|claude|codex|gemini-cli|gemini|kimi|grok|openai|anthropic|opencode|custom] [--model economy|ID] [--no-open]'; exit 0;;
     *) echo "Unknown option: $1" >&2; exit 1;;
   esac
 done
@@ -43,7 +43,7 @@ if [ -z "$SONA_PROVIDER" ] && [ -t 0 ]; then
   read -r -p 'AI provider [auto: existing Claude or Codex CLI; none: plain dictation]: ' SONA_PROVIDER
 fi
 SONA_PROVIDER=${SONA_PROVIDER:-auto}
-case "$SONA_PROVIDER" in auto|none|claude|codex|gemini|kimi|grok|openai|anthropic|opencode|custom) ;; *) echo 'Unknown AI provider.' >&2; exit 1;; esac
+case "$SONA_PROVIDER" in auto|none|claude|codex|gemini-cli|gemini|kimi|grok|openai|anthropic|opencode|custom) ;; *) echo 'Unknown AI provider.' >&2; exit 1;; esac
 swift build -c release
 .build/release/Murmur --validate-hotkey "$SONA_HOTKEY"
 echo 'Sona uses Microphone and Accessibility access. macOS will request these on first launch. No Input Monitoring grant is requested.'

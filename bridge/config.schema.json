@@ -7,16 +7,69 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "provider": { "enum": ["auto", "none", "claude", "codex", "anthropic", "openai", "gemini", "kimi", "grok", "opencode", "custom"], "default": "auto" },
-        "model": { "type": "string", "minLength": 1, "maxLength": 150, "default": "economy" },
-        "timeoutMs": { "type": "integer", "minimum": 250, "maximum": 30000, "default": 15000 },
-        "executable": { "type": "string", "description": "Absolute Claude/Codex executable path, or absolute Node executable path with one launcher script argument." },
-        "args": { "type": "array", "minItems": 1, "maxItems": 1, "items": { "type": "string" }, "description": "Only one absolute .js/.mjs/.cjs launcher path is allowed, and executable must be Node. Provider flags cannot override bridge safety controls." },
-        "endpoint": { "type": "string", "format": "uri", "description": "Full API endpoint. HTTPS required except explicit loopback custom servers. No credentials, query, fragment, or redirects. A built-in provider must keep its official origin." },
-        "apiKeyEnv": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$", "description": "Environment variable name only. Never place the credential value in this config." }
+        "provider": {
+          "enum": [
+            "auto",
+            "none",
+            "claude",
+            "codex",
+            "anthropic",
+            "openai",
+            "gemini-cli",
+            "gemini",
+            "kimi",
+            "grok",
+            "opencode",
+            "custom"
+          ],
+          "default": "auto"
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150,
+          "default": "economy"
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 250,
+          "maximum": 30000,
+          "default": 15000
+        },
+        "executable": {
+          "type": "string",
+          "description": "Absolute Claude/Codex/Gemini executable path, or absolute Node executable path with one launcher script argument."
+        },
+        "args": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "type": "string"
+          },
+          "description": "Only one absolute .js/.mjs/.cjs launcher path is allowed, and executable must be Node. Provider flags cannot override bridge safety controls."
+        },
+        "endpoint": {
+          "type": "string",
+          "format": "uri",
+          "description": "Full API endpoint. HTTPS required except explicit loopback custom servers. No credentials, query, fragment, or redirects. A built-in provider must keep its official origin."
+        },
+        "apiKeyEnv": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$",
+          "description": "Environment variable name only. Never place the credential value in this config."
+        }
       }
     },
-    "vocabulary": { "type": "array", "maxItems": 256, "items": { "type": "string", "minLength": 1, "maxLength": 100 } }
+    "vocabulary": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100
+      }
+    }
   },
   "additionalProperties": true
 }

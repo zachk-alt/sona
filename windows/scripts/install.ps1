@@ -44,7 +44,7 @@ try {
         }
     } finally { $zip.Dispose() }
     Expand-Archive -LiteralPath $PackagePath -DestinationPath $staged
-    if (-not (Test-Path -LiteralPath (Join-Path $staged 'Sona.exe')) -or -not (Test-Path -LiteralPath (Join-Path $staged 'bridge\sona-cleanup.mjs'))) { throw 'The package is incomplete.' }
+    if (-not (Test-Path -LiteralPath (Join-Path $staged 'Sona.exe')) -or -not (Test-Path -LiteralPath (Join-Path $staged 'bridge\sona-cleanup.mjs')) -or -not (Test-Path -LiteralPath (Join-Path $staged 'bridge\gemini-cli.mjs')) -or -not (Test-Path -LiteralPath (Join-Path $staged 'bridge\gemini-launch.mjs')) -or -not (Test-Path -LiteralPath (Join-Path $staged 'bridge\gemini-loader.mjs'))) { throw 'The package is incomplete.' }
 
     # Node is private to Sona; no PATH change and no global npm installation.
     $nodeVersion = 'v24.20.0'
@@ -87,6 +87,7 @@ try {
     $shortcut.TargetPath = $executable; $shortcut.WorkingDirectory = $install; $shortcut.IconLocation = "$executable,0"; $shortcut.Save()
     Write-Host "Sona installed to $install"
     Write-Host 'First launch lets you choose a shortcut and downloads the verified local speech model (about 148 MB).'
+    Write-Host 'Select Gemini CLI (existing login) in Sona settings to reuse an installed, signed-in Gemini CLI.'
     Write-Host 'Enable Microphone access and Let desktop apps access your microphone in Windows Privacy & security settings.'
     if (-not $NoLaunch) { Start-Process $executable }
 } finally {

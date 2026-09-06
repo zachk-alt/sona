@@ -118,6 +118,14 @@ internal sealed class App : Application
         catch (FileNotFoundException) { document = new(); }
         catch (JsonException) { throw new InvalidDataException("AI configuration is invalid JSON. Open it and correct it before saving."); }
         var ai = document["ai"] as JsonObject ?? new JsonObject();
+        string? previousProvider = ai["provider"]?.GetValue<string>();
+        if (previousProvider != provider)
+        {
+            // A different provider starts with its own default transport selectors.
+            // Credential values never live here; only API environment-variable names do.
+            ai.Remove("endpoint"); ai.Remove("apiKeyEnv");
+            ai.Remove("executable"); ai.Remove("args");
+        }
         ai["provider"] = provider; ai["model"] = string.IsNullOrEmpty(model) ? "economy" : model;
         ai["timeoutMs"] ??= 15000; document["ai"] = ai; document["vocabulary"] ??= new JsonArray();
         string temporary = AiPath + ".tmp";

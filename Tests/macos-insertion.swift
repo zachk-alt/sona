@@ -18,8 +18,10 @@ struct InsertionTests {
         let otherWindow = AXUIElementCreateApplication(4)
         func target(pid: pid_t = 1, element: AXUIElement? = field,
                     window: AXUIElement? = window, document: String? = "test-document",
-                    title: String? = "Test") -> FocusedElement.Target {
-            .init(pid: pid, element: element, window: window, document: document, windowTitle: title)
+                    title: String? = "Test", windowID: CGWindowID? = nil,
+                    activity: FocusedElement.Activity? = nil, blocked: Bool = false) -> FocusedElement.Target {
+            .init(pid: pid, element: element, window: window, document: document, windowTitle: title,
+                  windowID: windowID, activity: activity, blocked: blocked)
         }
         let original = target()
         check(FocusedElement.match(original, target()) == .same, "identical field")
@@ -27,11 +29,41 @@ struct InsertionTests {
         check(FocusedElement.match(original, target(element: otherField)) == .fieldChanged, "other field in same app")
         check(FocusedElement.match(original, target(window: otherWindow)) == .windowChanged, "other window")
         check(FocusedElement.match(original, target(document: "second-document")) == .documentChanged, "changed document")
-        check(FocusedElement.match(original, target(title: "Other")) == .documentChanged, "changed tab title")
+        check(FocusedElement.match(original, target(title: "Other")) == .same, "cosmetic title change with stable concrete field and document")
         check(FocusedElement.match(original, target(window: nil)) == .unavailable, "lost window identity")
         check(FocusedElement.match(original, target(element: nil)) == .unavailable, "unavailable current field")
         check(FocusedElement.match(target(element: nil), original) == .unavailable, "unavailable original field")
         check(FocusedElement.match(nil, original) == .unavailable, "no original target")
+
+        let session = UUID()
+        let activity = FocusedElement.Activity(session: session, revision: 7)
+        let movedActivity = FocusedElement.Activity(session: session, revision: 8)
+        let otherSession = FocusedElement.Activity(session: UUID(), revision: 7)
+        func compatibility(window: AXUIElement? = nil, id: CGWindowID? = 91,
+                           activity: FocusedElement.Activity? = activity,
+                           title: String? = "Working", blocked: Bool = false) -> FocusedElement.Target {
+            target(element: nil, window: window, document: nil, title: title,
+                   windowID: id, activity: activity, blocked: blocked)
+        }
+        let coarse = compatibility()
+        check(FocusedElement.match(coarse, compatibility()) == .same, "inaccessible editor with same session activity and window ID")
+        check(FocusedElement.match(coarse, compatibility(title: "Task finished")) == .same, "inaccessible editor title update is not navigation")
+        check(FocusedElement.match(compatibility(window: window, id: nil), compatibility(window: window, id: nil)) == .same, "fallback can use exact AX window without CG ID")
+        check(FocusedElement.match(coarse, compatibility(activity: movedActivity)) == .activityChanged, "observed input invalidates fallback")
+        check(FocusedElement.match(coarse, compatibility(activity: otherSession)) == .activityChanged, "activity from another session cannot authorize fallback")
+        check(FocusedElement.match(coarse, compatibility(activity: nil)) == .unavailable, "missing current activity refuses fallback")
+        check(FocusedElement.match(compatibility(activity: nil), coarse) == .unavailable, "missing original activity refuses fallback")
+        check(FocusedElement.match(coarse, compatibility(id: 92)) == .windowChanged, "another window ID refuses fallback")
+        check(FocusedElement.match(compatibility(window: window), compatibility(window: window, id: 92)) == .windowChanged, "matching AX window cannot override contradictory window IDs")
+        check(FocusedElement.match(compatibility(id: nil), compatibility(id: nil)) == .unavailable, "same PID alone cannot authorize fallback")
+        check(FocusedElement.match(compatibility(id: 0), compatibility(id: 0)) == .unavailable, "zero window IDs are not identity")
+        check(FocusedElement.match(coarse, compatibility(blocked: true)) == .blocked, "known blocked current control never receives compatibility paste")
+        check(FocusedElement.match(compatibility(blocked: true), coarse) == .blocked, "known blocked original control never becomes fallback")
+        let trackedField = target(document: nil, windowID: 91, activity: activity)
+        check(FocusedElement.match(trackedField, coarse) == .same, "temporary loss of concrete field can use unchanged monitored window")
+        check(FocusedElement.match(coarse, trackedField) == .same, "coarse field can become concrete without observed activity")
+        check(FocusedElement.match(trackedField, target(element: otherField, document: nil, windowID: 91, activity: activity)) == .fieldChanged, "known different fields cannot use compatibility fallback")
+        check(FocusedElement.match(target(element: nil, windowID: 91, activity: activity), target(element: nil, document: "other-document", windowID: 91, activity: activity)) == .documentChanged, "available document change refuses compatibility paste")
 
         let board = NSPasteboard(name: .init("SonaInsertionTests-\(UUID().uuidString)"))
         defer { board.releaseGlobally() }
@@ -137,6 +169,42 @@ struct InsertionTests {
         check(board.string(forType: .string) == recovered, "manual recovery not undone by delayed restore")
         check(!coordinator.hasPendingText && coordinator.pendingCount == 0 && pendingNotifications == 7, "successful recovery clears pending")
         check(!coordinator.copyPendingToClipboard(), "empty recovery leaves clipboard alone")
+        // Exercise the real clipboard coordinator with inaccessible/coarse AX metadata.
+        // Only event posting and the restoration clock are injected.
+        var compatibilityCurrent = coarse
+        var compatibilityActions: [@MainActor () -> Void] = []
+        var compatibilityPosts: [pid_t] = []
+        var compatibilityReads = 0
+        var activityChangesAtSecondCheck = false
+        var userCopiesAtSecondCheck = false
+        let compatibilityCoordinator = InsertionCoordinator(pasteboard: board, currentTarget: {
+            compatibilityReads += 1
+            if compatibilityReads == 2 && activityChangesAtSecondCheck {
+                if userCopiesAtSecondCheck { board.clearContents(); board.setString("new user copy", forType: .string) }
+                return compatibility(activity: movedActivity)
+            }
+            return compatibilityCurrent
+        }, postPaste: { pid in compatibilityPosts.append(pid); return true }, scheduleRestore: { compatibilityActions.append($0) })
+        func restoreCompatibility() {
+            let batch = compatibilityActions; compatibilityActions.removeAll()
+            for action in batch { action() }
+        }
+        setString("compatibility baseline")
+        check(compatibilityCoordinator.insert("Words for an inaccessible editor", into: coarse) == .paste, "unchanged coarse target uses actual paste coordinator")
+        check(compatibilityPosts == [1] && board.string(forType: .string) == "Words for an inaccessible editor", "compatibility paste uses captured PID and complete result")
+        restoreCompatibility()
+        check(board.string(forType: .string) == "compatibility baseline", "compatibility paste restores original clipboard")
+        compatibilityCurrent = compatibility(activity: movedActivity)
+        let beforeActivityRefusal = board.changeCount
+        check(compatibilityCoordinator.insert("pending after input", into: coarse) == .pending, "activity change before preparation retains words")
+        check(board.changeCount == beforeActivityRefusal && compatibilityPosts == [1], "first activity guard never changes clipboard or posts")
+        compatibilityCurrent = coarse; compatibilityReads = 0; activityChangesAtSecondCheck = true
+        check(compatibilityCoordinator.insert("pending activity race", into: coarse) == .pending, "activity change during preparation retains words")
+        check(board.string(forType: .string) == "compatibility baseline" && compatibilityPosts == [1], "final activity guard restores clipboard and posts nothing")
+        compatibilityReads = 0; userCopiesAtSecondCheck = true
+        check(compatibilityCoordinator.insert("pending new copy", into: coarse) == .pending, "activity and user copy during preparation retain words")
+        check(board.string(forType: .string) == "new user copy" && compatibilityPosts == [1], "final guard cannot overwrite new clipboard ownership")
+        check(compatibilityCoordinator.pendingCount == 3, "all compatibility refusals remain recoverable")
         print("PASS: \(assertions) focus and clipboard assertions, no real focus queries, keyboard events, or general clipboard access")
     }
 }

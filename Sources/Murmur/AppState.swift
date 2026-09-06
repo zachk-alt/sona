@@ -193,7 +193,13 @@ final class AppState {
                 return false
             }
         }
+        let binding = HotKeyBinding(config.hotkey) ?? HotKeyBinding("right-command")!
+        FocusedElement.beginTrackingActivity { event in
+            !binding.isModifier && Int64(event.keyCode) == binding.keyCode
+                && binding.matches(flags: CGEventFlags(rawValue: UInt64(event.modifierFlags.rawValue)))
+        }
         insertionTarget = FocusedElement.captureTarget()
+        Log.write("insert target: \(insertionTarget?.element == nil ? "window compatibility" : "Accessibility field")")
         phase = .armed
 
         // NOTHING user-visible happens until the delay elapses. Right Command
@@ -305,6 +311,7 @@ final class AppState {
         cleanup.shutdown()
         phase = .idle
         insertionTarget = nil
+        FocusedElement.endTrackingActivity()
         hotKey?.resetGesture()
         statusBar.showIdle()
     }

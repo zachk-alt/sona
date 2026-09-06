@@ -19,6 +19,7 @@ final class InsertionSelfTest: NSObject, NSApplicationDelegate {
     private var insertionTime: TimeInterval?
     private let firstText = "Sona native insertion test."
     private let pendingText = "Sona pending recovery test."
+    private let compatibilityText = " Sona compatibility insertion test."
 
     private init(previousApp: NSRunningApplication?, clipboard: ClipboardSnapshot) {
         self.previousApp = previousApp
@@ -111,8 +112,27 @@ final class InsertionSelfTest: NSObject, NSApplicationDelegate {
         try require(fieldA.string == firstText && fieldB.string.isEmpty, "native Cmd-V did not insert exactly once into field A")
         try require(clipboardMatchesOriginal(), "temporary paste did not restore the original clipboard")
         print("insertion-selftest: PASS: native paste delivered once; recording panel preserved focus; clipboard restored")
-        window?.makeFirstResponder(fieldB)
-        later(0.2) { try self.verifyChangedFieldAndRecovery() }
+        FocusedElement.beginTrackingActivity { _ in false }
+        // Reproduce an editor reporting AXError.noValue, while exercising the
+        // actual foreground window capture and the real native paste pipeline.
+        let unavailable = FocusedElement.Result(element: nil, error: .noValue, app: "Sona self-test",
+                                                pid: ProcessInfo.processInfo.processIdentifier)
+        let compatibilityTarget = FocusedElement.captureTarget(focus: unavailable)
+        try require(compatibilityTarget?.element == nil && compatibilityTarget?.activity != nil,
+                    "compatibility capture did not reproduce an unavailable AX field")
+        let result = TextInserter.insert(compatibilityText, into: compatibilityTarget)
+        if result == .paste { ownedClipboardChanges.insert(board.changeCount) }
+        insertionTime = ProcessInfo.processInfo.systemUptime
+        try require(result == .paste, "unavailable AX field was not accepted in the same untouched window")
+        later(1.25) {
+            try self.require(self.fieldA.string == self.firstText + self.compatibilityText,
+                             "compatibility native paste did not arrive exactly once")
+            try self.require(self.clipboardMatchesOriginal(), "compatibility paste did not restore clipboard")
+            print("insertion-selftest: PASS: unavailable AX field pasted once into unchanged window; clipboard restored")
+            FocusedElement.endTrackingActivity()
+            self.window?.makeFirstResponder(self.fieldB)
+            self.later(0.2) { try self.verifyChangedFieldAndRecovery() }
+        }
     }
 
     private func verifyChangedFieldAndRecovery() throws {
@@ -124,7 +144,7 @@ final class InsertionSelfTest: NSObject, NSApplicationDelegate {
         let result = TextInserter.insert(pendingText, into: originalTarget)
         try require(result == .pending && TextInserter.hasPendingText && TextInserter.pendingCount == 1,
                     "changed-field result was not retained")
-        try require(board.changeCount == before && fieldB.string.isEmpty && fieldA.string == firstText,
+        try require(board.changeCount == before && fieldB.string.isEmpty && fieldA.string == firstText + compatibilityText,
                     "changed-field refusal modified a field or clipboard")
         try require(TextInserter.copyPendingToClipboard(), "explicit pending recovery copy failed")
         let recoveryChange = board.changeCount
@@ -172,6 +192,7 @@ final class InsertionSelfTest: NSObject, NSApplicationDelegate {
     private func finish(status: Int32, message: String) {
         guard !finished else { return }
         finished = true
+        FocusedElement.endTrackingActivity()
         bar?.showIdle()
         // Let any real insertion lease complete before the process exits.
         let remainingLease = insertionTime.map { max(0, 1.2 - (ProcessInfo.processInfo.systemUptime - $0)) } ?? 0

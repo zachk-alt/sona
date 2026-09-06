@@ -21,3 +21,5 @@ The earlier run 34005956643 passed speech and bridge checks but failed its first
 No physical microphone, hardware shortcut, elevated target app, or authenticated AI account was exercised by CI. The automated pass does not replace microphone and real-app checks in `MANUAL-TESTS.md`. Future reports distinguish `passed`, `partial`, and `failed`; unavailable owned-window checks are explicitly recorded as skipped and cannot count as full runtime verification.
 
 The CI workflow builds and uploads artifacts only. It does not publish a GitHub release. The release owner must review results and publish the ZIP, installer, and trusted checksums.
+
+The later Gemini CLI settings option is distinct from the Gemini API option. Its provider ID is `gemini-cli`; `gemini` remains the API route, and Auto remains Claude/Codex only. The installer and native smoke test require the bundled `gemini-cli.mjs`, `gemini-launch.mjs`, and `gemini-loader.mjs` helpers. The provider-none smoke test does not verify a real Gemini login or account-backed request; the dedicated steps in `MANUAL-TESTS.md` cover that integration.
