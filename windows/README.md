@@ -60,7 +60,7 @@ Install the [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0), then
 .\windows\scripts\build.ps1
 ```
 
-The result is a self-contained single-file managed executable with native Whisper libraries, the bridge, and sounds as required sidecars. Distribute the ZIP as a unit. Whisper's custom native loader needs its `runtimes/` layout preserved. Native CPU and NoAVX fallback packages are pinned to 1.9.1. NAudio.Wasapi is pinned to the .NET 8-compatible 2.4.0 line. No CUDA or GPU setup is required.
+The result is a self-contained single-file managed executable with native Whisper libraries, the bridge, and sounds as required sidecars. Keep the ZIP contents together when installing. Whisper's custom native loader needs its `runtimes/` layout preserved. Native CPU and NoAVX fallback packages are pinned to 1.9.1. NAudio.Wasapi is pinned to the .NET 8-compatible 2.4.0 line. No CUDA or GPU setup is required.
 
 The core executable tests run on macOS/Linux/Windows. A Windows-only smoke test is available:
 

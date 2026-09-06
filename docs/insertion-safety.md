@@ -26,6 +26,18 @@ swiftc -module-cache-path .build/insertion-tests/module-cache \
 
 The executable performs 46 assertions with synthetic AX identities, an injected event sender, a deterministic restoration scheduler, and a temporary named pasteboard. It does not query user fields, post keyboard events, or access the general clipboard. It requires access to the macOS pasteboard service; a restrictive process sandbox can prevent the test's temporary pasteboard writes. It passed on the development Mac outside that sandbox. It does not substitute for application-level delivery checks.
 
+## Installed native smoke test
+
+The installed Sona bundle also passed `--insertion-selftest` with its existing Accessibility access. This test creates two disposable text fields in its own temporary window and uses the real capture, insertion, panel, and recovery code. It verified that native Cmd-V inserted the complete synthetic text exactly once, recording and processing panels preserved keyboard focus, switching fields refused automatic insertion, pending recovery copied the complete result, and the original clipboard was restored. No new permission was requested.
+
+To repeat it, launch the installed executable directly so the test can remember the prior foreground application:
+
+```sh
+/Applications/Sona.app/Contents/MacOS/Murmur --insertion-selftest
+```
+
+This explicit test briefly activates its own window, backs up the clipboard, and restores the prior foreground application on exit unless the user has switched elsewhere. It uses no microphone, AI provider, existing document, or personal text. It stops without prompting if existing Accessibility access is unavailable or the clipboard cannot be preserved.
+
 ## Manual application QA
 
 Use disposable documents and synthetic phrases. Keep another temporary text field available to verify refusal.
@@ -39,4 +51,4 @@ Use disposable documents and synthetic phrases. Keep another temporary text fiel
 7. Produce two pending recordings. Use Copy Pending Dictation, paste manually into a disposable field, and verify both complete texts appear in order.
 8. Copy something else during the one-second restore window, including the exact dictated text. Verify Sona preserves that new copy.
 
-Application-level scenarios are a release QA checklist. The headless tests do not claim they have been executed against installed applications.
+The installed test verifies delivery into Sona's own native fields. The third-party application scenarios above, including Safari and Electron editors, remain a manual release QA checklist and are not claimed as completed by that test.
