@@ -1,0 +1,26 @@
+name: Mac and shared bridge
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  mac:
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.20.0'
+      - name: Build native app
+        run: swift build -c release
+      - name: Shortcut and configuration behavior
+        run: bash scripts/test-hotkeys.sh
+      - name: Shared provider bridge
+        run: node --test bridge/test/*.test.mjs
+      - name: Swift bridge lifecycle
+        run: |
+          mkdir -p .build/bridge-tests
+          swiftc Sources/Murmur/Cleanup/CleanupService.swift Sources/Murmur/Cleanup/BridgeCleanupService.swift bridge/test/SwiftBridgeTests.swift -o .build/bridge-tests/check
+          .build/bridge-tests/check "$(command -v node)" "$PWD/bridge/test/fake-bridge.mjs"
+      - name: Shell syntax
+        run: bash -n bundle.sh install.sh make-signing-cert.sh scripts/*.sh

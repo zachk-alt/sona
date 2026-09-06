@@ -1,0 +1,18 @@
+{
+  "source": "../../Resources/SonaAppIcon.png",
+  "source_sha256": "bffd5aefc54c9b0c1c714774d5ae660bdb874a8f3ea9d5fc671c016e07bc7c89",
+  "operation": "Windows ICO packaging, proportional raster resampling only; no crop, recoloring, redraw, or generated artwork",
+  "source_dimensions": [
+    1254,
+    1254
+  ],
+  "ico_sizes": [
+    16,
+    24,
+    32,
+    48,
+    64,
+    128,
+    256
+  ]
+}

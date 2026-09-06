@@ -1,0 +1,57 @@
+name: Windows client
+on:
+  workflow_dispatch:
+  push:
+    paths: ['windows/**', 'bridge/**', 'Resources/**', '.github/workflows/windows.yml']
+  pull_request:
+    paths: ['windows/**', 'bridge/**', 'Resources/**', '.github/workflows/windows.yml']
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Core safety checks, Windows build, and package
+        shell: pwsh
+        run: ./windows/scripts/build.ps1 -OutputDirectory "${{ github.workspace }}/artifacts"
+      - name: Windows native engine, bridge, and owned-window smoke test
+        shell: pwsh
+        run: |
+          $qa = Join-Path $env:GITHUB_WORKSPACE 'artifacts/qa'
+          New-Item -ItemType Directory -Path $qa -Force | Out-Null
+          $report = Join-Path $qa 'windows-selftest.json'
+          $fixture = Join-Path $env:GITHUB_WORKSPACE 'windows/tests/Fixtures/jfk.wav'
+          $process = Start-Process -FilePath ./artifacts/publish/Sona.exe -ArgumentList '--self-test', "`"$report`"", '--fixture', "`"$fixture`"" -PassThru
+          if (-not $process.WaitForExit(600000)) { Stop-Process -Id $process.Id; throw 'Windows self-test exceeded ten minutes.' }
+          if (Test-Path $report) {
+            Get-Content $report
+            $result = Get-Content $report -Raw | ConvertFrom-Json
+            if ($result.status -eq 'partial') { Write-Warning 'Windows runtime validation is partial. Inspect skipped GUI checks before making desktop runtime claims.' }
+          }
+          if ($process.ExitCode -ne 0) { throw "Windows self-test failed: $($process.ExitCode)" }
+      - name: Validate PowerShell scripts
+        shell: pwsh
+        run: |
+          Get-ChildItem windows/scripts/*.ps1 | ForEach-Object {
+            $tokens = $null; $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count) { throw ($errors | Out-String) }
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Sona-windows-x64
+          path: |
+            artifacts/Sona-windows-x64.zip
+            artifacts/SHA256SUMS.txt
+            artifacts/install-windows.ps1
+            artifacts/qa/windows-selftest.json
+          if-no-files-found: warn

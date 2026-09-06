@@ -1,0 +1,8 @@
+{
+  "ai": {
+    "provider": "auto",
+    "model": "economy",
+    "timeoutMs": 15000
+  },
+  "vocabulary": ["Sona"]
+}
