@@ -11,6 +11,10 @@ When a user gives you this repository URL and asks to install Sona, read README.
 7. Explain the actual platform permissions: Mac Microphone and Accessibility, with a Keychain signing prompt on local builds; Windows desktop microphone access and possible administrator approval for Microsoft's runtime. Do not claim these were granted if the user has not granted them.
 8. Verify the installed version, icon and selected shortcut. Test raw dictation before optional AI cleanup. Keep the destination field focused. Report missing authentication, model availability or hardware checks honestly; raw transcript fallback must remain available.
 
+## License
+
+Read LICENSE before redistributing anything. Current Sona versions permit free use and private modifications but require prior written permission for independent publication or redistribution. Do not describe this license as MIT or open source. Existing third-party and earlier-version rights remain intact.
+
 ## Contribution constraints
 
 - Recording/loading panels must never activate or take keyboard focus.

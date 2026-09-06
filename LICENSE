@@ -1,21 +1,52 @@
-MIT License
+Sona Source-Available License 1.0
+Copyright (c) 2026 Actual Intelligence Labs
+All rights reserved except as expressly granted below.
 
-Copyright (c) 2026 Sona contributors
+1. Scope
+This license governs the Sona code, documentation and original assets supplied
+with this license (the Software). It is a source-available license, not the MIT
+License or an open-source license. Separately identified third-party components
+remain governed by their own licenses and notices.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+2. Permission to use and make private changes
+The copyright holder permits you, free of charge, to download, inspect, copy,
+build, run and privately modify the Software for your personal use or the
+internal use of your own organization. You may use private development and
+build services acting on your behalf for those purposes. Keep this license and
+copyright notices with your copies. You may freely share links to the official
+Sona repository and releases at https://github.com/zachk-alt/sona.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+3. No independent publication or redistribution
+Without prior written permission from the copyright holder, you may not
+publish, publicly host, redistribute, sell, sublicense, offer as a hosted
+service, or release the Software or a modified or derivative version outside
+your own organization. This restriction covers source code, compiled apps,
+installers, repackaged copies and versions released under another name. It
+applies whether or not you charge money. Private modification does not grant
+permission to publish or distribute the result.
 
+4. Hosting-platform rights and existing licenses
+This license does not restrict rights that the copyright holder has separately
+granted to GitHub or GitHub users under GitHub's Terms of Service, including
+viewing and forking a public repository through GitHub's functionality. That
+platform permission is not a grant from this license to distribute an
+independent application release. This license also does not revoke rights
+already granted for an earlier copy under a different license. Mandatory rights
+provided by applicable law are unaffected.
+
+5. Names and branding
+No trademark permission is granted to market an independent product as Sona or
+Actual Intelligence Labs, or to imply endorsement. The included names and
+artwork may remain in the copies you are permitted to run privately.
+
+6. Termination
+If you breach this license, the permissions granted by this license terminate.
+You must stop the infringing use and publication. Rights under an earlier or
+third-party license are governed by that license instead.
+
+7. No warranty or liability
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+IMPLIED, INCLUDING MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE COPYRIGHT HOLDER
+AND CONTRIBUTORS ARE NOT LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY
+ARISING FROM USE OF OR INABILITY TO USE THE SOFTWARE.

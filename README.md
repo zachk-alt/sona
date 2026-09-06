@@ -2,7 +2,7 @@
 
 Your voice, in your text field. Tap your chosen key, speak, then tap again to finish.
 
-Sona is free, open-source dictation by Actual Intelligence Labs. Speech recognition runs on your computer. Optional AI cleanup uses an existing supported CLI account or an explicitly configured API provider. There is no Sona subscription. Your AI provider's account limits and API charges still apply.
+Sona is free, source-available dictation by Actual Intelligence Labs. Speech recognition runs on your computer. Optional AI cleanup uses an existing supported CLI account or an explicitly configured API provider. There is no Sona subscription. Your AI provider's account limits and API charges still apply.
 
 **Mac:** macOS 26+, Apple silicon. **Windows:** Windows 11, x64.
 
@@ -62,6 +62,10 @@ Automatic mode selects an installed Claude or Codex CLI. It never silently choos
 
 The reviewed model catalog, environment variable names, request isolation and configuration schema live in [bridge/README.md](bridge/README.md). Economy is a fixed small or low-effort choice where available, not a live price optimizer. An unavailable model, timeout, invalid response or missing login falls back to the original local transcript. There is no automatic upgrade to a more expensive model.
 
+## Updates
+
+Sona does not auto-update or require installing a new Sona version to keep using the installed app. Update it when you choose. After initial model setup, plain speech recognition works locally. Optional AI cleanup still depends on your selected provider; if it becomes unavailable, Sona falls back to the local transcript. Operating-system compatibility and provider/model availability can change independently.
+
 ## Using Sona
 
 - Tap your shortcut to start and tap again to finish. Mac also supports holding and releasing it.
@@ -115,4 +119,4 @@ Preview modes use synthetic audio and do not open the microphone. `--doctor` rep
 
 ## License
 
-Sona source and original assets are MIT licensed. Dependencies keep their own licenses. Their notices ship with the Windows package and bundled Node runtime. AI provider and operating-system trademarks belong to their respective owners; Sona is not affiliated with them.
+Sona source and original assets use the [Sona Source-Available License](LICENSE). Use and private edits are allowed; publishing or redistributing copies or modified versions requires prior written permission. See [LICENSING.md](LICENSING.md) for the earlier MIT version and GitHub platform rights. Dependencies keep their own licenses. Their notices ship with the Windows package and bundled Node runtime. AI provider and operating-system trademarks belong to their respective owners; Sona is not affiliated with them.
