@@ -15,7 +15,7 @@ public sealed record AppSettings
     public int Version { get; init; } = 1;
     public bool SetupComplete { get; init; }
     public Shortcut Shortcut { get; init; } = new();
-    public bool CleanupEnabled { get; init; }
+    public bool CleanupEnabled { get; init; } = true;
     public string Language { get; init; } = "auto";
     public string? MicrophoneId { get; init; }
     public string? NodePath { get; init; }

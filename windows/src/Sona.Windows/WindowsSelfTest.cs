@@ -88,7 +88,21 @@ internal static class WindowsSelfTest
                 return;
             }
             void Check(string name, bool value) { checks[name] = value; if (!value) throw new InvalidOperationException(name); }
-            var first = await TextInsertion.CaptureAsync(allowOwnProcess: true);
+            checks["owned_wpf_keyboard_focus"] = a.IsKeyboardFocused;
+            // A new desktop can initialize its accessibility provider lazily. Retry only
+            // this owned field, with a short deadline and sanitized status evidence.
+            FocusTarget? first = null;
+            var captureStatuses = new List<string>();
+            var captureWatch = System.Diagnostics.Stopwatch.StartNew();
+            do
+            {
+                var capture = await TextInsertion.CaptureWithStatusAsync(allowOwnProcess: true);
+                captureStatuses.Add(capture.Status); first = capture.Target;
+                if (first != null || Native.GetForegroundWindow() != handle) break;
+                await Task.Delay(150);
+            } while (captureWatch.Elapsed < TimeSpan.FromSeconds(4));
+            checks["owned_capture_statuses"] = captureStatuses;
+            checks["owned_capture_elapsed_ms"] = captureWatch.ElapsedMilliseconds;
             Check("capture_owned_editable_field", first != null);
             panel.Recording(handle, "Ctrl + Alt + F10"); await Task.Delay(150);
             Check("overlay_preserves_foreground_recording", Native.GetForegroundWindow() == handle);

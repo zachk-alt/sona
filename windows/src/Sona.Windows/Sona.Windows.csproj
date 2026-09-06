@@ -26,6 +26,7 @@
     <PackageReference Include="Whisper.net.Runtime" Version="1.9.1" GeneratePathProperty="true" ExcludeAssets="build;buildTransitive" />
     <PackageReference Include="Whisper.net.Runtime.NoAvx" Version="1.9.1" GeneratePathProperty="true" ExcludeAssets="build;buildTransitive" />
     <None Include="../../../Resources/Sounds/*.wav" Link="sounds/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <None Include="../../../LICENSE" Link="SONA-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
     <None Include="../../docs/licenses/*.txt" Link="licenses/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
     <Resource Include="../../assets/Sona.ico" Link="Assets/Sona.ico" />
     <Resource Include="../../../Resources/SonaAppIcon.png" Link="Assets/SonaAppIcon.png" />

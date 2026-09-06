@@ -23,3 +23,5 @@ Microsoft references for insertion and privacy:
 - https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput
 - https://learn.microsoft.com/en-us/dotnet/core/deploying/single-file/overview
 - https://support.microsoft.com/en-us/windows/privacy/turn-on-app-permissions-for-your-microphone-in-windows
+
+Sona's application source and original assets are governed by the repository `LICENSE`, shipped as `SONA-LICENSE.txt`. This is separate from the third-party licenses above; those notices and rights are unchanged.

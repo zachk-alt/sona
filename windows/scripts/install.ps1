@@ -7,7 +7,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-if (-not [Environment]::Is64BitOperatingSystem -or $env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or [Environment]::OSVersion.Version.Build -lt 22000) {
+if (-not [Environment]::Is64BitOperatingSystem -or $env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64' -or [Environment]::OSVersion.Version.Build -lt 22000) {
     throw 'This Sona release requires Windows 11 x64.'
 }
 $install = Join-Path $env:LOCALAPPDATA 'Programs\Sona'
@@ -24,8 +24,10 @@ try {
         $checksums = @($release.assets | Where-Object name -eq 'SHA256SUMS.txt')
         if ($asset.Count -ne 1 -or $checksums.Count -ne 1) { throw 'This release does not contain the Windows package and checksums yet.' }
         $PackagePath = Join-Path $temporary 'Sona-windows-x64.zip'
-        Invoke-WebRequest $asset[0].browser_download_url -OutFile $PackagePath
-        $checksumText = (Invoke-WebRequest $checksums[0].browser_download_url).Content
+        Invoke-WebRequest -UseBasicParsing -TimeoutSec 300 $asset[0].browser_download_url -OutFile $PackagePath
+        $checksumFile = Join-Path $temporary 'SHA256SUMS.txt'
+        Invoke-WebRequest -UseBasicParsing -TimeoutSec 300 $checksums[0].browser_download_url -OutFile $checksumFile
+        $checksumText = Get-Content -LiteralPath $checksumFile -Raw
         $line = @($checksumText -split "`n" | Where-Object { $_ -match '^[0-9a-fA-F]{64}\s+\*?Sona-windows-x64\.zip\s*$' })
         if ($line.Count -ne 1) { throw 'The Windows package checksum is missing or ambiguous.' }
         $Sha256 = ($line[0] -split '\s+')[0]
@@ -50,7 +52,7 @@ try {
     $nodeHash = '6cac9ffbca8f6a47091e4b5c772e0606049c3871cb67d900c0cedde630e545ba'
     $nodeZip = Join-Path $temporary $nodeName
     Write-Host 'Preparing the local cleanup runtime…'
-    Invoke-WebRequest "https://nodejs.org/dist/$nodeVersion/$nodeName" -OutFile $nodeZip
+    Invoke-WebRequest -UseBasicParsing -TimeoutSec 300 "https://nodejs.org/dist/$nodeVersion/$nodeName" -OutFile $nodeZip
     if ((Get-FileHash $nodeZip -Algorithm SHA256).Hash -ne $nodeHash) { throw 'The Node download failed its integrity check.' }
     $nodeExpanded = Join-Path $temporary 'node'
     Expand-Archive $nodeZip $nodeExpanded
@@ -64,7 +66,7 @@ try {
     if (-not $vc -or $vc.Installed -ne 1 -or $vc.Minor -lt 40) {
         Write-Host 'Installing the Microsoft speech-runtime dependency. Windows may request administrator approval.'
         $redist = Join-Path $temporary 'vc_redist.x64.exe'
-        Invoke-WebRequest 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile $redist
+        Invoke-WebRequest -UseBasicParsing -TimeoutSec 300 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile $redist
         $signature = Get-AuthenticodeSignature $redist
         if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') { throw 'Microsoft runtime signature validation failed.' }
         $result = Start-Process $redist -ArgumentList '/install', '/quiet', '/norestart' -Wait -PassThru

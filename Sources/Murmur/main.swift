@@ -11,6 +11,8 @@ import Foundation
 
 let arguments = CommandLine.arguments
 
+if arguments.contains("--insertion-selftest") { MainActor.assumeIsolated { InsertionSelfTest.run() } }
+
 /// Runs an async CLI mode to completion, then exits with its status.
 func runCommand(_ body: @escaping () async -> Int32) -> Never {
     Task { exit(await body()) }

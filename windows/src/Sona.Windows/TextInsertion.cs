@@ -6,42 +6,61 @@ namespace Sona.Windows;
 
 internal sealed record FocusTarget(nint Window, uint Process, nint Focus, int[] RuntimeId);
 internal sealed record FocusMetadata(int[] RuntimeId, bool IsPassword, bool Editable);
+internal sealed record FocusRead(FocusMetadata? Metadata, string Status);
 
 internal static class TextInsertion
 {
-    private static FocusMetadata? ReadMetadata()
+    private static readonly object MetadataGate = new();
+    private static Task<FocusRead>? pendingMetadata;
+    private static FocusRead ReadMetadata()
     {
         try
         {
             var element = AutomationElement.FocusedElement;
-            if (element == null) return null;
+            if (element == null) return new(null, "no_automation_focus");
             var c = element.Current;
             bool editable = c.ControlType == ControlType.Edit || c.ControlType == ControlType.Document;
             if (element.TryGetCurrentPattern(ValuePattern.Pattern, out var value)) editable = !((ValuePattern)value).Current.IsReadOnly;
-            return new(element.GetRuntimeId(), c.IsPassword, editable && c.IsEnabled && c.IsKeyboardFocusable);
+            var metadata = new FocusMetadata(element.GetRuntimeId(), c.IsPassword, editable && c.IsEnabled && c.IsKeyboardFocusable);
+            string status = c.IsPassword ? "password" : !c.IsEnabled ? "disabled" : !c.IsKeyboardFocusable ? "not_focusable" : !editable ? "not_editable" : "ready";
+            return new(metadata, status);
         }
-        catch (Exception e) when (e is not OutOfMemoryException) { return null; }
+        catch (Exception e) when (e is not OutOfMemoryException) { return new(null, "automation_" + e.GetType().Name); }
     }
-    private static async Task<FocusMetadata?> MetadataAsync()
+    private static async Task<FocusRead> MetadataAsync()
     {
-        try { return await Task.Run(ReadMetadata).WaitAsync(TimeSpan.FromMilliseconds(600)); }
-        catch (TimeoutException) { return null; }
+        Task<FocusRead> read;
+        lock (MetadataGate)
+        {
+            // Keep all UIA calls off the WPF thread. A stuck external provider must not
+            // accumulate abandoned thread-pool work after each shortcut press.
+            if (pendingMetadata is { IsCompleted: false }) return new(null, "automation_busy");
+            read = pendingMetadata = Task.Run(ReadMetadata);
+        }
+        // Cold UIA initialization can exceed 600 ms on a fresh Windows session.
+        try { return await read.WaitAsync(TimeSpan.FromMilliseconds(1500)); }
+        catch (TimeoutException) { return new(null, "automation_timeout"); }
     }
     public static async Task<FocusTarget?> CaptureAsync(bool allowOwnProcess = false)
+        => (await CaptureWithStatusAsync(allowOwnProcess)).Target;
+    internal static async Task<(FocusTarget? Target, string Status)> CaptureWithStatusAsync(bool allowOwnProcess = false)
     {
         var window = Native.GetForegroundWindow();
         var info = Native.FocusAt(window);
-        if (window == 0 || info.Focus == 0 || (!allowOwnProcess && info.Process == Environment.ProcessId)) return null;
-        var metadata = await MetadataAsync();
-        if (metadata is not { IsPassword: false, Editable: true } || Native.GetForegroundWindow() != window || Native.FocusAt(window) != info) return null;
-        return new(window, info.Process, info.Focus, metadata.RuntimeId);
+        if (window == 0) return (null, "no_foreground_window");
+        if (info.Focus == 0) return (null, "no_native_focus");
+        if (!allowOwnProcess && info.Process == Environment.ProcessId) return (null, "own_process");
+        var read = await MetadataAsync();
+        if (read.Metadata is not { IsPassword: false, Editable: true } metadata) return (null, read.Status);
+        if (Native.GetForegroundWindow() != window || Native.FocusAt(window) != info) return (null, "focus_changed");
+        return (new(window, info.Process, info.Focus, metadata.RuntimeId), "ready");
     }
     public static async Task<bool> PasteAsync(FocusTarget target, string text)
     {
         // Never synthesize Ctrl+V while a physical modifier remains down.
         for (int i = 0; Native.AnyModifierHeld() && i < 50; i++) await Task.Delay(20);
         if (Native.AnyModifierHeld()) return false;
-        var metadata = await MetadataAsync();
+        var metadata = (await MetadataAsync()).Metadata;
         if (metadata is not { IsPassword: false, Editable: true }) return false;
         bool Matches()
         {

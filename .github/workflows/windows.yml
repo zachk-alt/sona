@@ -2,9 +2,9 @@ name: Windows client
 on:
   workflow_dispatch:
   push:
-    paths: ['windows/**', 'bridge/**', 'Resources/**', '.github/workflows/windows.yml']
+    paths: ['LICENSE', 'windows/**', 'bridge/**', 'Resources/**', '.github/workflows/windows.yml']
   pull_request:
-    paths: ['windows/**', 'bridge/**', 'Resources/**', '.github/workflows/windows.yml']
+    paths: ['LICENSE', 'windows/**', 'bridge/**', 'Resources/**', '.github/workflows/windows.yml']
 permissions:
   contents: read
 jobs:
@@ -22,6 +22,12 @@ jobs:
       - name: Core safety checks, Windows build, and package
         shell: pwsh
         run: ./windows/scripts/build.ps1 -OutputDirectory "${{ github.workspace }}/artifacts"
+      - name: Install package with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $package = Join-Path $env:GITHUB_WORKSPACE 'artifacts/Sona-windows-x64.zip'
+          $hash = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash
+          & ./windows/scripts/install.ps1 -PackagePath $package -Sha256 $hash -NoLaunch
       - name: Windows native engine, bridge, and owned-window smoke test
         shell: pwsh
         run: |
@@ -29,7 +35,8 @@ jobs:
           New-Item -ItemType Directory -Path $qa -Force | Out-Null
           $report = Join-Path $qa 'windows-selftest.json'
           $fixture = Join-Path $env:GITHUB_WORKSPACE 'windows/tests/Fixtures/jfk.wav'
-          $process = Start-Process -FilePath ./artifacts/publish/Sona.exe -ArgumentList '--self-test', "`"$report`"", '--fixture', "`"$fixture`"" -PassThru
+          $installed = Join-Path $env:LOCALAPPDATA 'Programs/Sona/Sona.exe'
+          $process = Start-Process -FilePath $installed -ArgumentList '--self-test', "`"$report`"", '--fixture', "`"$fixture`"" -PassThru
           if (-not $process.WaitForExit(600000)) { Stop-Process -Id $process.Id; throw 'Windows self-test exceeded ten minutes.' }
           if (Test-Path $report) {
             Get-Content $report

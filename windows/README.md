@@ -46,7 +46,7 @@ Local settings and the verified model live in `%LOCALAPPDATA%\Sona`:
 - `ai.json`: shared bridge configuration, model choice, and vocabulary.
 - `models\ggml-base.bin`: local speech model.
 
-Recordings and the last transcript are held in memory. Sona does not write dictation history. Explicit manual copying changes the clipboard normally. Cleanup is off by default. With cleanup on, the transcript is sent to the configured AI provider; account limits or API charges still apply. Existing CLI sign-in stays with that CLI. API credentials must be supplied via the provider's environment variable, not copied into Sona configuration.
+Recordings and the last transcript are held in memory. Sona does not write dictation history. Explicit manual copying changes the clipboard normally. Cleanup is enabled for new setups and can be turned off in settings. Auto selection only uses an installed supported CLI and falls back to the raw transcript when none is available. With cleanup on, the transcript is sent to the configured AI provider; account limits or API charges still apply. Existing CLI sign-in stays with that CLI. API credentials must be supplied via the provider's environment variable, not copied into Sona configuration.
 
 Auto selection uses supported installed Claude/Codex CLIs. Other configured providers use the shared bridge's supported API routes. Open **AI configuration** for endpoint, executable, argument, API key environment-variable name, vocabulary, or advanced options. See `bridge/README.md` in the source repository for the current provider matrix. A missing Node binary, bridge failure, empty result, or timeout preserves the original transcript. The subprocess uses stdin, bounded output, no shell, and a 35-second outer deadline.
 
@@ -71,3 +71,7 @@ The core executable tests run on macOS/Linux/Windows. A Windows-only smoke test 
 It downloads the verified model, transcribes the public JFK fixture, runs the bridge in passthrough mode, and exercises only its own test window with synthetic keys and a temporary clipboard sentinel. It never opens a microphone or authenticates an AI account. If an interactive desktop cannot be activated, its report explicitly marks GUI checks skipped. CI runs this command and uploads the report with the build artifacts.
 
 A successful cross-compile is not Windows runtime verification. Before calling a release fully tested, inspect the Windows CI report and complete `docs/MANUAL-TESTS.md` on a Windows 11 computer with a microphone and real target apps.
+
+## License
+
+Sona's source and original assets use the repository `LICENSE`, included in the Windows package as `SONA-LICENSE.txt`. It permits use and private edits under its terms and restricts redistribution. The separate third-party licenses in `licenses/` remain unchanged.

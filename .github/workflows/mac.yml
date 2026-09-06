@@ -15,6 +15,11 @@ jobs:
         run: swift build -c release
       - name: Shortcut and configuration behavior
         run: bash scripts/test-hotkeys.sh
+      - name: Focus and clipboard safety
+        run: |
+          mkdir -p .build/insertion-tests
+          swiftc Sources/Murmur/FocusedElement.swift Sources/Murmur/TextInserter.swift Tests/macos-insertion.swift -o .build/insertion-tests/check
+          .build/insertion-tests/check
       - name: Shared provider bridge
         run: node --test bridge/test/*.test.mjs
       - name: Swift bridge lifecycle

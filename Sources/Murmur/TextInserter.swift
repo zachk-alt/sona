@@ -14,7 +14,9 @@ enum TextInserter {
         pasteboard: .general,
         currentTarget: { FocusedElement.captureTarget() },
         postPaste: postCommandV,
-        scheduleRestore: { action in DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: action) })
+        scheduleRestore: { action in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { action() }
+        })
 
     static var hasPendingText: Bool { coordinator.hasPendingText }
     static var pendingCount: Int { coordinator.pendingCount }

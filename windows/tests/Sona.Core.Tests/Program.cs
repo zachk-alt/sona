@@ -5,6 +5,8 @@ using System.Text;
 using Sona.Core;
 
 // A dependency-free executable test harness. Throws/nonzero on failure.
+Console.InputEncoding = new UTF8Encoding(false);
+Console.OutputEncoding = new UTF8Encoding(false);
 if (args.Length > 0 && args[0] == "--child")
 {
     var text = await Console.In.ReadToEndAsync();
@@ -44,6 +46,9 @@ try
 {
     string config = Path.Combine(temp, "settings.json");
     Check(!SettingsStore.Load(config).SetupComplete, "blank machine requires setup");
+    Check(SettingsStore.Load(config).CleanupEnabled, "new setup enables selected AI cleanup");
+    SettingsStore.Save(config, new AppSettings { CleanupEnabled = false });
+    Check(!SettingsStore.Load(config).CleanupEnabled, "explicit cleanup opt-out persists");
     SettingsStore.Save(config, new AppSettings { SetupComplete = true, Shortcut = new Shortcut(0xA3, 0) });
     Check(SettingsStore.Load(config).Shortcut.VirtualKey == 0xA3, "chosen shortcut persists");
     await File.WriteAllTextAsync(config, "{bad");
