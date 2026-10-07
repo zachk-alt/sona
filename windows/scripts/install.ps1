@@ -46,7 +46,7 @@ try {
     Expand-Archive -LiteralPath $PackagePath -DestinationPath $staged
     if (-not (Test-Path -LiteralPath (Join-Path $staged 'Sona.exe')) -or -not (Test-Path -LiteralPath (Join-Path $staged 'bridge\sona-cleanup.mjs')) -or -not (Test-Path -LiteralPath (Join-Path $staged 'bridge\gemini-cli.mjs')) -or -not (Test-Path -LiteralPath (Join-Path $staged 'bridge\gemini-launch.mjs')) -or -not (Test-Path -LiteralPath (Join-Path $staged 'bridge\gemini-loader.mjs'))) { throw 'The package is incomplete.' }
 
-    foreach ($required in @('bridge\assistant.mjs','bridge\assistant-transports.mjs','bridge\blender.mjs','bridge\blender-scene.py','bridge\errors.mjs','bridge\snippets.mjs','bridge\operations.mjs','bridge\prompts\rewrite.txt','bridge\prompts\snippet-assist.txt')) {
+    foreach ($required in @('bridge\assistant.mjs','bridge\assistant-transports.mjs','bridge\errors.mjs','bridge\snippets.mjs','bridge\operations.mjs','bridge\prompts\rewrite.txt','bridge\prompts\snippet-assist.txt')) {
         if (-not (Test-Path -LiteralPath (Join-Path $staged $required))) { throw "The package is incomplete: $required" }
     }
 

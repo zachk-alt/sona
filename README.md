@@ -132,7 +132,7 @@ node --test bridge/test/*.test.mjs
 ./bundle.sh --no-install
 ```
 
-`test-session-recovery.sh` drives real dictation sessions with a stalling fake speech engine, with nothing on screen. `test-exception-recovery.sh` raises real Objective-C exceptions in child processes and checks the last-resort recovery. `test-audio-recovery.sh` uses your real microphone and holds it exclusively for about two and a half seconds in total, in two grabs, to reproduce a busy microphone; it skips without a microphone or microphone permission.
+`test-cues.sh` and `test-audio-recovery.sh` run locally only: GitHub's hosted macOS runner renders the cue test's offline audio below its expected level, and the audio test needs a real microphone. `test-session-recovery.sh` drives real dictation sessions with a stalling fake speech engine, with nothing on screen. `test-exception-recovery.sh` raises real Objective-C exceptions in child processes and checks the last-resort recovery. `test-audio-recovery.sh` uses your real microphone and holds it exclusively for about two and a half seconds in total, in two grabs, to reproduce a busy microphone; it skips without a microphone or microphone permission.
 
 `bundle.sh` requires the local identity from `make-signing-cert.sh` and prepares the pinned Node runtime. The `--no-install` option leaves the signed app in a temporary build folder. Windows source build and test instructions are in [windows/README.md](windows/README.md).
 

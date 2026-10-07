@@ -15,8 +15,6 @@ jobs:
         run: swift build -c release
       - name: Shortcut and configuration behavior
         run: bash scripts/test-hotkeys.sh
-      - name: Cue playback recovery
-        run: bash scripts/test-cues.sh
       - name: Dictation session recovery
         run: bash scripts/test-session-recovery.sh
       - name: Exception recovery
