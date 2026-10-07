@@ -8,6 +8,8 @@ For an unavailable or coarse Accessibility field, Mac Sona can use a compatibili
 
 When identity changes or compatibility cannot be established, Sona retains the completed dictation in memory and exposes **Copy Pending Dictation** in its menu. Multiple pending recordings are preserved in order and separated by a blank line when copied. An explicit successful recovery copy clears the pending queue. Pending text is not persisted, so quitting Sona discards it.
 
+A blocked insertion logs a fixed reason code identifying a changed destination, a changed selection, an unreadable or changed clipboard, or failed paste-event creation. The code also identifies whether the destination changed before or after clipboard preparation. These diagnostics contain no transcript, clipboard contents, window titles, URLs, or document names.
+
 A temporary paste preserves every readable representation of every original pasteboard item, including an empty original clipboard. If a promised representation cannot be read, insertion is retained for recovery instead of replacing that clipboard. Restoration runs after the existing one-second delivery grace period and only if the pasteboard still has Sona's exact change count. Copying even identical text elsewhere establishes new ownership, so Sona leaves it alone. Rapid consecutive pastes share the original snapshot. Explicit recovery is a permanent user-requested clipboard copy and is never undone by an earlier restore callback.
 
 ## Compatibility limits

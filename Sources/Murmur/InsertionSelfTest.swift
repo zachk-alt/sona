@@ -16,6 +16,8 @@ final class InsertionSelfTest: NSObject, NSApplicationDelegate {
     private let fieldB = NSTextView()
     private var originalTarget: FocusedElement.Target?
     private var finished = false
+    private let correction = CorrectionObservation(observesLocalEvents:true)
+    private var spellingOffer: String?
     private var insertionTime: TimeInterval?
     private let firstText = "Sona native insertion test."
     private let pendingText = "Sona pending recovery test."
@@ -78,7 +80,7 @@ final class InsertionSelfTest: NSObject, NSApplicationDelegate {
         NSApp.activate()
         window.makeFirstResponder(fieldA)
         later(0.5) { try self.captureAndShowPanel() }
-        later(10) { throw Failure(message: "watchdog expired") }
+        later(25) { throw Failure(message: "watchdog expired") }
     }
 
     private func captureAndShowPanel() throws {
@@ -158,7 +160,75 @@ final class InsertionSelfTest: NSObject, NSApplicationDelegate {
         bar?.showProcessing()
         later(0.15) {
             try self.require(self.ownsFocus(self.fieldB), "processing panel changed keyboard focus")
-            self.finish(status: 0, message: "PASS: all native checks completed")
+            try self.beginFeatureChecks()
+        }
+    }
+
+    private func beginFeatureChecks() throws {
+        bar?.showIdle()
+        FocusedElement.beginTrackingActivity { TextInserter.isOwnPasteEvent($0) }
+        guard let before = SelectionSnapshot.capture() else { throw Failure(message:"native empty selection could not be verified") }
+        try require(before.contents.isEmpty && before.contents.characterCount == 0,"field B was not empty")
+        let result = TextInserter.insert("Hello Jon.",into:before.target)
+        if result == .paste { ownedClipboardChanges.insert(board.changeCount) }
+        insertionTime = ProcessInfo.processInfo.systemUptime
+        try require(result == .paste,"owned observation baseline paste was not sent")
+        later(0.35) {
+            try self.require(self.fieldB.string == "Hello Jon.","owned observation baseline did not arrive")
+            self.correction.enabled = true
+            self.correction.onSuggestion = { [weak self] word in self?.spellingOffer = word }
+            self.correction.verifyAndBegin(text:"Hello Jon.",before:before)
+            try self.require(self.correction.isObserving && self.correction.observerStarts == 1,"actual AX observer did not register after verified paste")
+            self.fieldB.setSelectedRange(NSRange(location:6,length:3))
+            self.later(0.15) { self.postOwnedCharacter("J",code:38) }
+            self.later(0.35) { self.postOwnedCharacter("a",code:0) }
+            self.later(0.55) { self.postOwnedCharacter("n",code:45) }
+            self.later(1.6) {
+                try self.require(self.fieldB.string == "Hello Jan.","owned correction typing did not arrive")
+                try self.require(self.spellingOffer == "Jan","native AX correction did not produce the confirmed-word offer")
+                self.correction.enabled = false
+                let reads = self.correction.contentReads
+                self.fieldB.string = "Outside the expired correction scope"
+                self.later(0.2) {
+                    try self.require(!self.correction.isObserving && self.correction.contentReads == reads,"off-state observer performed extra reads")
+                    print("insertion-selftest: PASS: real AX observer/timer, native word correction, explicit suggestion and off-state teardown")
+                    try self.verifyCommandReplacement()
+                }
+            }
+        }
+    }
+    private func postOwnedCharacter(_ character:String,code:UInt16) {
+        guard ownsFocus(fieldB), let window else { return }
+        for kind in [NSEvent.EventType.keyDown,.keyUp] {
+            if let event = NSEvent.keyEvent(with:kind,location:.zero,modifierFlags:[],timestamp:ProcessInfo.processInfo.systemUptime,
+                windowNumber:window.windowNumber,context:nil,characters:character,charactersIgnoringModifiers:character,isARepeat:false,keyCode:code) {
+                NSApp.postEvent(event,atStart:false)
+            }
+        }
+    }
+    private func verifyCommandReplacement() throws {
+        let prefix = "prefix:", selected = "\t old \r\n", suffix = ":suffix"
+        fieldB.string = prefix + selected + suffix
+        fieldB.setSelectedRange(NSRange(location:prefix.utf16.count,length:selected.utf16.count))
+        FocusedElement.beginTrackingActivity { TextInserter.isOwnPasteEvent($0) }
+        guard let snapshot = SelectionSnapshot.capture() else { throw Failure(message:"owned command selection unavailable") }
+        try require(snapshot.contents.text == selected,"selected whitespace was not captured exactly")
+        let replacement = "\t new \r\n"
+        let result = TextInserter.insert(replacement,into:snapshot.target,validateSelection:{ snapshot.matchesNow() })
+        if result == .paste { ownedClipboardChanges.insert(board.changeCount) }
+        insertionTime = ProcessInfo.processInfo.systemUptime
+        try require(result == .paste,"verified command replacement was refused")
+        later(0.35) {
+            try self.require(self.fieldB.string == prefix + replacement + suffix,"one native replacement changed outside selection or whitespace")
+            self.fieldB.setSelectedRange(NSRange(location:0,length:3))
+            let count = self.board.changeCount
+            let stale = TextInserter.insert("NEVER",into:snapshot.target,validateSelection:{ snapshot.matchesNow() })
+            try self.require(stale == .pending && self.board.changeCount == count,"stale selection caused a clipboard or target write")
+            self.fieldB.isEditable = false
+            try self.require(SelectionSnapshot.capture() == nil,"read-only AX field accepted a command")
+            self.fieldB.isEditable = true
+            print("insertion-selftest: PASS: complete native command replacement, whitespace preserved, stale/read-only selection refused")
+            self.finish(status:0,message:"PASS: all native insertion and feature checks completed")
         }
     }
 
@@ -192,6 +262,7 @@ final class InsertionSelfTest: NSObject, NSApplicationDelegate {
     private func finish(status: Int32, message: String) {
         guard !finished else { return }
         finished = true
+        correction.stop()
         FocusedElement.endTrackingActivity()
         bar?.showIdle()
         // Let any real insertion lease complete before the process exits.

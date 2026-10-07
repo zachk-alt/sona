@@ -17,7 +17,17 @@ final class StatusBarController {
     /// Full-colour blue badge with the figure in white. Thin strokes tinted
     /// blue on a dark menu bar are close to invisible; a badge is not.
     private let recordingIcon = StatusBarController.loadIcon("MenuIconRecording", template: false)
-    private let panel: NSPanel
+    private let panel: RecordingPanel
+    // Joining ordinary Spaces alone does not permit an overlay in another
+    // app's full-screen Space or Stage Manager set. Keep recording and loading
+    // visible there without activating Sona or making this panel key.
+    private static let recordingSpaces: NSWindow.CollectionBehavior = [
+        .canJoinAllSpaces, .canJoinAllApplications, .fullScreenAuxiliary,
+        .stationary, .ignoresCycle
+    ]
+    private var currentGlassSize = StatusBarController.glassSize
+    private var activityHighlighted = false
+    private var reopeningMenu = false
     private var dismissalTimer: Timer?
     private var dismissalOrigin: NSPoint?
     private static let glowMargin: CGFloat = 26
@@ -28,6 +38,11 @@ final class StatusBarController {
     var onToggleCleanup: (() -> Void)?
     var onToggleLoginItem: (() -> Void)?
     var onSelectSound: ((String) -> Void)?
+    var onTextSettings: (() -> Void)?
+    var onSuggestSnippets: (() -> Void)?
+    var onReviewCorrection: (() -> Void)?
+    private var correctionAvailable = false
+    private var errorLabel: NSTextField?
     var onChangeHotkey: (() -> Void)?
     var onCopyPending: (() -> Void)?
     private var hasPendingText = false
@@ -42,14 +57,20 @@ final class StatusBarController {
         rebuildMenu()
     }
 
+
     private(set) var cleanupEnabled = true
     private var backendLabel = "checking..."
 
     init() {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.autosaveName = "Sona.MenuBar"
+        item.behavior = []
+        item.isVisible = true
         if let button = item.button {
             button.image = idleIcon
             button.imagePosition = .imageOnly
+            button.toolTip = "Sona"
+            button.setAccessibilityLabel("Sona")
         }
         panel = Self.makePanel(containing: wave)
         rebuildMenu()
@@ -77,8 +98,11 @@ final class StatusBarController {
 
     /// Where the panel sits on screen, for the --panel preview mode.
     var panelScreenFrame: NSRect { panel.frame }
+    var panelWindowNumber: Int { panel.windowNumber }
+    var panelGlassSize: NSSize { currentGlassSize }
+    var isActivityHighlighted: Bool { activityHighlighted }
 
-    private static func makePanel(containing view: NSView) -> NSPanel {
+    private static func makePanel(containing view: NSView) -> RecordingPanel {
         let ailBlue = Self.ailBlue
         let glassSize = Self.glassSize
         let radius = Self.glassRadius
@@ -94,7 +118,7 @@ final class StatusBarController {
         panel.animationBehavior = .none
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
-        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        panel.collectionBehavior = Self.recordingSpaces
 
         // Content: the spectrum edge to edge, the credit bottom-right.
         let content = NSView(frame: NSRect(origin: .zero, size: glassSize))
@@ -129,16 +153,17 @@ final class StatusBarController {
 
         // Depth. A real drop shadow below (the glass floats) and a faint blue
         // bloom all round (it is lit from within).
-        root.layer?.addSublayer(Self.shadowLayer(outlinePath, bounds: root.bounds, color: .black,
-                                                 opacity: 0.30, radius: 14, offset: CGSize(width: 0, height: -7)))
-        root.layer?.addSublayer(Self.shadowLayer(outlinePath, bounds: root.bounds, color: ailBlue,
-                                                 opacity: 0.18, radius: 22, offset: .zero))
+        let depth = Self.shadowLayer(outlinePath, bounds: root.bounds, color: .black,
+                                    opacity: 0.30, radius: 14, offset: CGSize(width: 0, height: -7))
+        let bloom = Self.shadowLayer(outlinePath, bounds: root.bounds, color: ailBlue,
+                                    opacity: 0.18, radius: 22, offset: .zero)
+        root.layer?.addSublayer(depth); root.layer?.addSublayer(bloom)
         root.addSubview(glass)
 
         root.addSubview(content)
 
         // Everything that plays on the surface sits in one overlay above the glass.
-        let overlay = NSView(frame: root.bounds)
+        let overlay = RecordingDecorationView(frame: root.bounds)
         overlay.wantsLayer = true
         overlay.autoresizingMask = [.width, .height]
 
@@ -206,6 +231,33 @@ final class StatusBarController {
 
         panel.contentView = root
         panel.formations = [core, halo]
+        panel.recordingContent = content
+        panel.resizeSurface = { [weak panel] requested in
+            guard let panel else { return }
+            let size = NSSize(width: requested.width + 2*m, height: requested.height + 2*m)
+            let glassFrame = NSRect(x: m, y: m, width: requested.width, height: requested.height)
+            let outline = CGPath(roundedRect: glassFrame, cornerWidth: radius, cornerHeight: radius, transform: nil)
+            let inner = CGPath(roundedRect: CGRect(origin: .zero, size: requested), cornerWidth: radius, cornerHeight: radius, transform: nil)
+            CATransaction.begin(); CATransaction.setDisableActions(true)
+            panel.setContentSize(size); root.frame.size = size
+            glass.frame = glassFrame; content.frame = glassFrame
+            overlay.frame = root.bounds
+            for layer in [depth, bloom] { layer.frame = root.bounds; layer.path = outline; layer.shadowPath = outline }
+            inside.frame = glassFrame; inside.path = inner; inside.mask = Self.fillMask(inner, size: requested)
+            rim.frame = glassFrame; rim.mask = Self.outlineMask(requested, radius: radius, lineWidth: 1.2)
+            let side = ceil(hypot(requested.width, requested.height)) + 8
+            let track = CGRect(x: glassFrame.midX-side/2, y: glassFrame.midY-side/2, width: side, height: side)
+            let trackOutline = CGRect(x: glassFrame.minX-track.minX, y: glassFrame.minY-track.minY, width: requested.width, height: requested.height)
+            for (formation, lineWidth, blur) in [(core, CGFloat(1.6), CGFloat(0)), (halo, CGFloat(2), CGFloat(5))] {
+                formation.resize(frame: track)
+                let mask = CAShapeLayer(); mask.frame = CGRect(origin: .zero, size: track.size)
+                mask.path = CGPath(roundedRect: trackOutline, cornerWidth: radius, cornerHeight: radius, transform: nil)
+                mask.fillColor = nil; mask.strokeColor = NSColor.white.cgColor; mask.lineWidth = lineWidth
+                if blur > 0 { mask.shadowColor = NSColor.white.cgColor; mask.shadowOpacity = 1; mask.shadowRadius = blur; mask.shadowOffset = .zero }
+                formation.track.mask = mask
+            }
+            CATransaction.commit()
+        }
         return panel
     }
 
@@ -266,14 +318,11 @@ final class StatusBarController {
     }
 
     func showRecording() {
+        restoreCompactSurface()
+        errorLabel?.removeFromSuperview(); errorLabel = nil; wave.isHidden = false
         cancelDismissal()
-        if let button = item.button, let window = button.window {
-            let frame = window.convertToScreen(button.convert(button.bounds, to: nil))
-            let size = panel.frame.size
-            // Centre the GLASS under the icon; the panel is larger by the glow margin.
-            panel.setFrameOrigin(NSPoint(x: frame.midX - size.width / 2,
-                                         y: frame.minY - size.height + Self.glowMargin - 6))
-        }
+        positionSurface()
+        activityHighlighted = true
         item.button?.image = recordingIcon
         wave.startAnimating()
         panel.formations?.forEach { $0.stop() }
@@ -282,8 +331,25 @@ final class StatusBarController {
         panel.orderFrontRegardless()
     }
 
+    func showError(_ message: String) {
+        showRecording()
+        wave.isHidden = true
+        let label = NSTextField(wrappingLabelWithString: message)
+        label.font = .systemFont(ofSize:13,weight:.medium); label.alignment = .center
+        label.textColor = .labelColor
+        label.frame = wave.frame.insetBy(dx:12,dy:12)
+        wave.superview?.addSubview(label); errorLabel = label
+        DispatchQueue.main.asyncAfter(deadline:.now()+3) { [weak self, weak label] in
+            guard let self, let label, self.errorLabel === label else { return }
+            label.removeFromSuperview(); self.errorLabel = nil; self.wave.isHidden = false; self.showIdle()
+        }
+    }
+
     func showProcessing() {
+        restoreCompactSurface()
+        errorLabel?.removeFromSuperview(); errorLabel = nil; wave.isHidden = false
         cancelDismissal()
+        positionSurface(); activityHighlighted = true
         item.button?.image = recordingIcon
         wave.startProcessing()
         startLights()
@@ -291,6 +357,7 @@ final class StatusBarController {
     }
 
     func showIdle() {
+        activityHighlighted = false
         item.button?.image = idleIcon
         guard panel.isVisible else {
             finishDismissal()
@@ -318,6 +385,61 @@ final class StatusBarController {
         RunLoop.main.add(timer, forMode: .common)
     }
 
+    /// Hide the owned recording surface without changing focus.
+    func suspendSurface() { cancelDismissal(); panel.orderOut(nil) }
+    private func restoreCompactSurface() {
+        panel.recordingContent?.isHidden = false
+        if currentGlassSize != Self.glassSize { panel.resizeSurface?(Self.glassSize); currentGlassSize = Self.glassSize }
+    }
+    private func positionSurface() {
+        let anchor = menuAnchor()
+        let size = panel.frame.size
+        let displays = NSScreen.screens.compactMap { screen -> AssistantPanelPlacement.Display? in
+            guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
+            return .init(quartzFrame: CGDisplayBounds(id.uint32Value), frame: screen.frame, visibleFrame: screen.visibleFrame)
+        }
+        if let origin = AssistantPanelPlacement.recordingOrigin(displays: displays, menuAnchor: anchor,
+                fallbackFrame: NSScreen.main?.frame, panelSize: size, glowMargin: Self.glowMargin) {
+            panel.setFrameOrigin(origin)
+        }
+    }
+
+    private func menuAnchor() -> NSRect? {
+        guard item.isVisible else { return nil }
+        return item.button.flatMap { button in
+            button.window.map { $0.convertToScreen(button.convert(button.bounds, to: nil)) }
+        }
+    }
+
+    /// Opening the app again must remain useful when macOS obscures its icon.
+    /// Show the existing menu in screen coordinates without activating Sona
+    /// or making the recording panel key.
+    func reopenMenu() {
+        item.isVisible = true
+        item.length = NSStatusItem.squareLength
+        item.button?.image = activityHighlighted ? recordingIcon : idleIcon
+        guard !reopeningMenu else { return }
+        reopeningMenu = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            defer { self.reopeningMenu = false }
+            guard let menu = self.item.menu,
+                  let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+            let visible = screen.visibleFrame
+            let location = NSPoint(x: max(visible.minX + 8, visible.maxX - menu.size.width - 8),
+                                   y: visible.maxY - 6)
+            menu.popUp(positioning: nil, at: location, in: nil)
+        }
+    }
+
+    /// Explicit presentation self-test only. No microphone or field access.
+    func exerciseHiddenStatusItem(_ verify: () throws -> Void) rethrows {
+        let wasVisible = item.isVisible
+        item.isVisible = false
+        defer { item.isVisible = wasVisible }
+        try verify()
+    }
+
     private func cancelDismissal() {
         dismissalTimer?.invalidate()
         dismissalTimer = nil
@@ -331,6 +453,7 @@ final class StatusBarController {
         wave.stopAnimating()
         panel.formations?.forEach { $0.stop() }
         cancelDismissal()
+        restoreCompactSurface()
     }
 
     /// Two lights that never pass each other, on a script written fresh
@@ -370,8 +493,8 @@ final class StatusBarController {
 
     func refreshMenu() { rebuildMenu() }
     func setPendingText(_ available: Bool) { hasPendingText = available; rebuildMenu() }
+    func setCorrectionAvailable(_ value: Bool) { correctionAvailable = value; rebuildMenu() }
     func setHotkey(_ name: String) { hotkeyName = name; rebuildMenu() }
-
     private func rebuildMenu() {
         let menu = NSMenu()
 
@@ -394,7 +517,6 @@ final class StatusBarController {
                                 action: #selector(toggleCleanup), keyEquivalent: "")
         toggle.target = self
         menu.addItem(toggle)
-
         let login = NSMenuItem(title: "Open at login",
                                action: #selector(toggleLoginItem), keyEquivalent: "")
         login.target = self
@@ -423,7 +545,18 @@ final class StatusBarController {
         shortcut.target = self
         menu.addItem(shortcut)
 
-        let recovery = NSMenuItem(title: "Copy pending dictation", action: hasPendingText ? #selector(copyPending) : nil, keyEquivalent: "")
+        let textSettings = NSMenuItem(title: "Vocabulary and saved phrases...", action:#selector(openTextSettings),keyEquivalent:"")
+        textSettings.target = self; menu.addItem(textSettings)
+        if onSuggestSnippets != nil {
+            let suggest = NSMenuItem(title: "Suggest saved phrases...", action:#selector(suggestSnippets),keyEquivalent:"")
+            suggest.target = self; menu.addItem(suggest)
+        }
+        if correctionAvailable {
+            let review = NSMenuItem(title: "Review spelling suggestion...",action:#selector(reviewCorrection),keyEquivalent:"")
+            review.target = self; menu.addItem(review)
+        }
+
+        let recovery = NSMenuItem(title: "Copy pending text", action: hasPendingText ? #selector(copyPending) : nil, keyEquivalent: "")
         recovery.target = self
         recovery.isEnabled = hasPendingText
         menu.addItem(recovery)
@@ -440,6 +573,9 @@ final class StatusBarController {
         item.menu = menu
     }
 
+    @objc private func openTextSettings() { onTextSettings?() }
+    @objc private func suggestSnippets() { onSuggestSnippets?() }
+    @objc private func reviewCorrection() { onReviewCorrection?() }
     @objc private func changeHotkey() { onChangeHotkey?() }
     @objc private func copyPending() { onCopyPending?() }
     @objc private func toggleCleanup() { onToggleCleanup?() }
@@ -496,6 +632,11 @@ private final class Formation {
     func stop() {
         track.isHidden = true
         for layer in [group, leader, follower, tail] { layer.removeAllAnimations() }
+    }
+    func resize(frame: CGRect) {
+        track.frame = frame; group.bounds = CGRect(origin: .zero, size: frame.size)
+        group.position = CGPoint(x: frame.width/2, y: frame.height/2)
+        for layer in [tail, follower, leader] { layer.frame = group.bounds }
     }
 }
 
@@ -643,8 +784,13 @@ private final class RecordingCredit: NSTextField {
 
 /// Recording must leave the insertion target's keyboard focus untouched.
 private final class RecordingPanel: NSPanel {
+    var recordingContent: NSView?
+    var resizeSurface: ((NSSize) -> Void)?
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
+}
+private final class RecordingDecorationView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 /// A native, appearance-aware menu material over the refracting desktop.
@@ -664,6 +810,12 @@ private final class RecordingGlassView: NSView {
     }
 
     required init?(coder: NSCoder) { nil }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let changed = frame.size != newSize
+        super.setFrameSize(newSize)
+        if changed { updateMaterial() }
+    }
 
     deinit {
         if let displayObserver {

@@ -3,6 +3,8 @@ import Foundation
 /// User-tunable settings, read from ~/.config/murmur/config.json when present.
 struct Config: Codable {
     var hotkey = "right-command"
+    var snippets: [Snippet] = []
+    var autoAddToDictionary = false
     var setupComplete = false
     var ai = AISettings()
 
@@ -56,8 +58,8 @@ struct Config: Codable {
     /// sound itself, not from room.
     var cueReverb: Double = 0.0
 
-    private enum CodingKeys: String, CodingKey {
-        case hotkey, setupComplete, ai, vocabulary, strictModeBundleIDs, claudePath, cleanupEnabled,
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case hotkey, snippets, autoAddToDictionary, setupComplete, ai, vocabulary, strictModeBundleIDs, claudePath, cleanupEnabled,
              requireTextField, sound, startSound, stopSound, cueReverb
     }
 
@@ -70,6 +72,8 @@ struct Config: Codable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let d = Config()
         hotkey = try c.decodeIfPresent(String.self, forKey: .hotkey) ?? d.hotkey
+        snippets = try c.decodeIfPresent([Snippet].self, forKey: .snippets) ?? []
+        autoAddToDictionary = try c.decodeIfPresent(Bool.self, forKey: .autoAddToDictionary) ?? false
         setupComplete = try c.decodeIfPresent(Bool.self, forKey: .setupComplete) ?? true
         ai = try c.decodeIfPresent(AISettings.self, forKey: .ai) ?? d.ai
         vocabulary = try c.decodeIfPresent([String].self, forKey: .vocabulary) ?? d.vocabulary
@@ -88,14 +92,48 @@ struct Config: Codable {
             .appendingPathComponent(".config/murmur/config.json")
     }
 
-    func save() {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try? FileManager.default.createDirectory(
-            at: Self.configURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if let data = try? encoder.encode(self) {
-            try? data.write(to: Self.configURL)
-        }
+    func validationError() -> String? {
+        guard HotKeyBinding(hotkey) != nil else { return "Choose a valid dictation shortcut." }
+        guard vocabulary.count <= 256, vocabulary.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.utf16.count <= 100 && !$0.unicodeScalars.contains(where: { $0.value < 32 || (127...159).contains($0.value) }) }) else { return "Use up to 256 vocabulary entries, each 1 to 100 characters on one line." }
+        guard snippets.count <= 128, snippets.allSatisfy({ $0.isValid }), snippets.reduce(0, { $0 + $1.expansion.utf8.count }) <= 65536 else { return "Use up to 128 snippets with a short trigger and a nonempty expansion." }
+        let triggers = snippets.map { $0.trigger.folding(options: [.caseInsensitive], locale: Locale(identifier: "en_US_POSIX")) }
+        guard Set(triggers).count == triggers.count else { return "Snippet triggers must be unique." }
+        return nil
+    }
+
+    /// Merge only app-owned fields and replace atomically. Unknown settings survive.
+    @discardableResult
+    func save(to url: URL = Self.configURL) -> String? {
+        if let error = validationError() { return error }
+        do {
+            let encoded = try JSONEncoder().encode(self)
+            var updated = try JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+            var merged: [String: Any] = [:]
+            if FileManager.default.fileExists(atPath: url.path) {
+                let old = try Data(contentsOf: url)
+                guard let object = try JSONSerialization.jsonObject(with: old) as? [String: Any] else { return "The existing settings file is invalid; it was not replaced." }
+                guard let existing = try? JSONDecoder().decode(Config.self,from:old), existing.validationError() == nil else {
+                    return "The existing settings file contains invalid values. It was not replaced; repair it in Open config file first."
+                }
+                if var oldAI = object["ai"] as? [String:Any], let newAI = updated["ai"] as? [String:Any] {
+                    for key in ["provider","model","timeoutMs","executable","args","endpoint","apiKeyEnv"] { oldAI.removeValue(forKey:key) }
+                    oldAI.merge(newAI) { _, new in new }; updated["ai"] = oldAI
+                }
+                merged = object
+            }
+            // Retired second-hotkey settings are ignored during decoding and
+            // removed on a successful save, even when old values are malformed.
+            // They must never reset or block the user's dictation preferences.
+            merged.removeValue(forKey: "commandHotkey")
+            merged.removeValue(forKey: "assistant")
+            // Remove optional app-owned fields that the new configuration cleared.
+            for key in CodingKeys.allCases { merged.removeValue(forKey: key.stringValue) }
+            merged.merge(updated) { _, new in new }
+            let data = try JSONSerialization.data(withJSONObject: merged, options: [.prettyPrinted, .sortedKeys])
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: url, options: .atomic)
+            return nil
+        } catch { return "Settings could not be saved. The previous file was retained." }
     }
 
     static func load() -> Config {
@@ -144,4 +182,44 @@ struct AISettings: Codable {
         endpoint = try c.decodeIfPresent(String.self, forKey: .endpoint)
         apiKeyEnv = try c.decodeIfPresent(String.self, forKey: .apiKeyEnv)
     }
+}
+
+struct Snippet: Codable, Equatable {
+    var trigger: String
+    var expansion: String
+    var isValid: Bool {
+        let cleaned = trigger.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !cleaned.isEmpty && cleaned == trigger && trigger.unicodeScalars.count <= 120
+            && !trigger.contains("\n") && !trigger.contains("\r")
+            && !expansion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && expansion.utf8.count <= 8192
+            && !trigger.unicodeScalars.contains(where: { $0.value < 32 || (127...159).contains($0.value) || [0x2028,0x2029].contains($0.value) })
+            && !expansion.unicodeScalars.contains(where: { ($0.value < 32 || (127...159).contains($0.value)) && ![9,10,13].contains($0.value) })
+    }
+}
+
+struct AssistantChoice: Codable, Equatable {
+    var provider: String
+    var model: String
+    var effort: String
+}
+struct AssistantSettings: Codable, Equatable {
+    var provider = "inherit"
+    var model = "default"
+    var effort = "default"
+    var timeoutMs = 120000
+    enum CodingKeys: String,CodingKey { case provider,model,effort,timeoutMs }
+    init() {}
+    init(from decoder:Decoder) throws {
+        let c = try decoder.container(keyedBy:CodingKeys.self)
+        provider = try c.decodeIfPresent(String.self,forKey:.provider) ?? "inherit"
+        model = try c.decodeIfPresent(String.self,forKey:.model) ?? "default"
+        effort = try c.decodeIfPresent(String.self,forKey:.effort) ?? "default"
+        timeoutMs = try c.decodeIfPresent(Int.self,forKey:.timeoutMs) ?? 120000
+    }
+    var isValid: Bool {
+        [provider,model,effort].allSatisfy { !$0.isEmpty && $0.utf8.count <= 256 && !$0.unicodeScalars.contains { $0.value < 32 || (127...159).contains($0.value) } }
+            && (250...180000).contains(timeoutMs)
+    }
+    var choice: AssistantChoice { .init(provider:provider,model:model,effort:effort) }
+    mutating func select(_ choice:AssistantChoice) { provider = choice.provider; model = choice.model; effort = choice.effort }
 }

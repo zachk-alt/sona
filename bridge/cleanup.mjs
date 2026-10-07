@@ -4,6 +4,9 @@ import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { BridgeError, fail } from './errors.mjs';
+import { expandSnippets, validateSnippets } from './snippets.mjs';
+export { BridgeError } from './errors.mjs';
 import { GEMINI_MODEL, GEMINI_VERSION, geminiInput, geminiVersion, parseGeminiOutput, prepareGemini } from './gemini-cli.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -12,7 +15,7 @@ const MAX_RESPONSE = 1024 * 1024;
 export const PROVIDERS = Object.freeze({
   claude: { transport: 'cli', model: 'claude-haiku-4-5-20251001', executable: 'claude' },
   codex: { transport: 'cli', model: 'gpt-5.6-luna', executable: 'codex' },
-  'gemini-cli': { transport: 'cli', model: GEMINI_MODEL, executable: 'gemini' },
+  'gemini-cli': { transport: 'cli', model: GEMINI_MODEL, executable: 'gemini', localSessionHistory: true },
   anthropic: { transport: 'anthropic', model: 'claude-haiku-4-5-20251001', endpoint: 'https://api.anthropic.com/v1/messages', apiKeyEnv: 'ANTHROPIC_API_KEY' },
   openai: { transport: 'compatible', model: 'gpt-5-nano-2025-08-07', endpoint: 'https://api.openai.com/v1/chat/completions', apiKeyEnv: 'OPENAI_API_KEY' },
   gemini: { transport: 'compatible', model: 'gemini-2.5-flash-lite', endpoint: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', apiKeyEnv: 'GEMINI_API_KEY' },
@@ -22,17 +25,19 @@ export const PROVIDERS = Object.freeze({
   custom: { transport: 'compatible' },
 });
 
-export class BridgeError extends Error {
-  constructor(code) { super(code); this.code = code; }
-}
-const fail = (code) => { throw new BridgeError(code); };
 const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
-const boundedString = (value, max) => typeof value === 'string' && value.length > 0 && value.length <= max && !/[\x00-\x1f]/u.test(value);
+const boundedString = (value, max) => typeof value === 'string' && value.length > 0 && value.length <= max && !/[\x00-\x1f\x7f-\x9f]/u.test(value);
 
 export function parseConfig(config = {}) {
   if (!object(config) || (config.ai !== undefined && !object(config.ai))) fail('invalid_config');
   const ai = { provider: 'auto', model: 'economy', timeoutMs: 15000, ...config.ai };
   if (!['auto', 'none', ...Object.keys(PROVIDERS)].includes(ai.provider)) fail('invalid_provider');
+  // Read-only compatibility for the old Mac setting. Explicit new routes and
+  // executables always win; this does not rewrite the user's configuration.
+  if (config.claudePath !== undefined && ['auto', 'claude'].includes(ai.provider) && ai.executable === undefined) {
+    if (!boundedString(config.claudePath, 4096) || !path.isAbsolute(config.claudePath)) fail('invalid_legacy_claude_path');
+    ai.provider = 'claude'; ai.executable = config.claudePath;
+  }
   if (!boundedString(ai.model, 150) || !Number.isInteger(ai.timeoutMs) || ai.timeoutMs < 250 || ai.timeoutMs > 30000) fail('invalid_config');
   // Credential values have no place in the config. Only their environment names are accepted.
   const allowed = new Set(['provider', 'model', 'timeoutMs', 'executable', 'args', 'endpoint', 'apiKeyEnv']);
@@ -47,7 +52,10 @@ export function parseConfig(config = {}) {
   if (ai.apiKeyEnv !== undefined && !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/u.test(ai.apiKeyEnv)) fail('invalid_key_environment_name');
   if (config.vocabulary !== undefined && (!Array.isArray(config.vocabulary) || config.vocabulary.length > 256 ||
       config.vocabulary.some((value) => !boundedString(value, 100)))) fail('invalid_vocabulary');
-  return { ...ai, vocabulary: config.vocabulary ?? [] };
+  if (config.commandHotkey !== undefined && (typeof config.commandHotkey !== 'string' || config.commandHotkey.length > 100 || /[\x00-\x1f\x7f]/u.test(config.commandHotkey))) fail('invalid_command_hotkey');
+  if (config.autoAddToDictionary !== undefined && typeof config.autoAddToDictionary !== 'boolean') fail('invalid_auto_dictionary');
+  return { ...ai, vocabulary: config.vocabulary ?? [], snippets: validateSnippets(config.snippets),
+    commandHotkey: config.commandHotkey ?? 'right-option', autoAddToDictionary: config.autoAddToDictionary ?? false };
 }
 
 async function executable(file) {
@@ -80,7 +88,7 @@ export async function resolveCLI(provider, config = {}, env = process.env) {
   return null;
 }
 
-async function select(config, env) {
+export async function select(config, env) {
   let provider = config.provider;
   if (provider === 'auto') {
     if (config.executable || config.args || config.endpoint || config.apiKeyEnv || config.model !== 'economy') fail('auto_requires_defaults');
@@ -304,44 +312,67 @@ export function validateText(result, original) {
   return result;
 }
 
+// Every versioned operation uses this policy. Old configuration files still
+// parse, but a stored model override cannot upgrade a new operation's request.
+export function operationConfig(config) {
+  const preset = PROVIDERS[config.provider];
+  if (preset?.localSessionHistory) fail('local_history_not_allowed');
+  if (preset && !preset.model) fail('economy_not_reviewed');
+  return { ...config, model: 'economy' };
+}
+
+// Throwing, single-request transport. It neither substitutes snippets nor
+// catches errors into usable text; operation-specific callers own that policy.
+export async function oneRequest(payload, config, { prompt, env = process.env, signal, strictPolicy = true } = {}) {
+  if (!['prose', 'strict', 'rewrite', 'snippet-assist'].includes(prompt)) fail('invalid_mode');
+  if (signal?.aborted) fail('cancelled');
+  if (strictPolicy) config = operationConfig(config);
+  const selected = await select(config, env);
+  if (selected.provider === 'none') fail('ai_disabled');
+  const system = await readFile(path.join(ROOT, 'prompts', `${prompt}.txt`), 'utf8');
+  const input = JSON.stringify(payload);
+  let result;
+  if (selected.launch) {
+    const scratch = await mkdtemp(path.join(tmpdir(), 'sona-cleanup-'));
+    try {
+      if (selected.provider === 'gemini-cli') {
+        const deadline = Date.now() + config.timeoutMs;
+        let prepared;
+        try { prepared = await prepareGemini(selected.launch, selected.model, scratch, system, env); }
+        catch (error) { throw new BridgeError(error.code?.startsWith('gemini_') ? error.code : 'gemini_prepare_failed'); }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) fail('timeout');
+        const output = await runProcess(prepared.launch, prepared.args, geminiInput(input),
+          { env: prepared.env, cwd: scratch, signal, timeoutMs: remaining });
+        if (await readFile(path.join(scratch, 'guard-applied'), 'utf8').catch(() => '') !== 'verified') fail('gemini_guard_not_applied');
+        try { result = parseGeminiOutput(output, selected.model); }
+        catch (error) { throw new BridgeError(error.code ?? 'invalid_response'); }
+      } else {
+        result = parseCLIOutput(selected.provider, await runProcess(selected.launch,
+          cliArguments(selected.provider, selected.model, prompt, system, scratch), input,
+          { env, cwd: scratch, signal, timeoutMs: config.timeoutMs }));
+      }
+    } finally {
+      // Only this invocation's newly created scratch directory is removed.
+      await rm(scratch, { recursive: true, force: true }).catch(() => {});
+    }
+  } else result = await runAPI(selected.provider, selected.model, config, system, input, env, signal);
+  return result;
+}
+
 export async function cleanup(original, rawConfig = {}, { mode = 'prose', env = process.env, signal, diagnose = () => {} } = {}) {
   try {
     if (typeof original !== 'string') fail('invalid_input');
     if (!original.trim()) return original;
     if (Buffer.byteLength(original) > MAX_INPUT) fail('input_too_large');
     if (!['prose', 'strict'].includes(mode)) fail('invalid_mode');
-    const config = parseConfig(rawConfig), selected = await select(config, env);
-    if (selected.provider === 'none') return original;
-    if (signal?.aborted) fail('cancelled');
-    const system = await readFile(path.join(ROOT, 'prompts', `${mode}.txt`), 'utf8');
-    const input = JSON.stringify({ transcript: original, vocabulary: config.vocabulary });
-    let result;
-    if (selected.launch) {
-      const scratch = await mkdtemp(path.join(tmpdir(), 'sona-cleanup-'));
-      try {
-        if (selected.provider === 'gemini-cli') {
-          const deadline = Date.now() + config.timeoutMs;
-          let prepared;
-          try { prepared = await prepareGemini(selected.launch, selected.model, scratch, system, env); }
-          catch (error) { throw new BridgeError(error.code?.startsWith('gemini_') ? error.code : 'gemini_prepare_failed'); }
-          const remaining = deadline - Date.now();
-          if (remaining <= 0) fail('timeout');
-          const output = await runProcess(prepared.launch, prepared.args, geminiInput(input),
-            { env: prepared.env, cwd: scratch, signal, timeoutMs: remaining });
-          if (await readFile(path.join(scratch, 'guard-applied'), 'utf8').catch(() => '') !== 'verified') fail('gemini_guard_not_applied');
-          try { result = parseGeminiOutput(output, selected.model); }
-          catch (error) { throw new BridgeError(error.code ?? 'invalid_response'); }
-        } else {
-          result = parseCLIOutput(selected.provider, await runProcess(selected.launch,
-            cliArguments(selected.provider, selected.model, mode, system, scratch), input,
-            { env, cwd: scratch, signal, timeoutMs: config.timeoutMs }));
-        }
-      } finally {
-        // Only this invocation's newly created scratch directory is removed.
-        await rm(scratch, { recursive: true, force: true }).catch(() => {});
-      }
-    } else result = await runAPI(selected.provider, selected.model, config, system, input, env, signal);
-    return validateText(result, original);
+    const config = parseConfig(rawConfig);
+    const expanded = expandSnippets(original, config.snippets, MAX_INPUT);
+    if (config.provider === 'none') return expanded;
+    const result = await oneRequest({ transcript: expanded, vocabulary: config.vocabulary }, config, { prompt: mode, env, signal });
+    const text = validateText(result, expanded);
+    if (Buffer.byteLength(text) > MAX_INPUT) fail('invalid_cleaned_text');
+    return text;
   } catch (error) {
     diagnose(error instanceof BridgeError ? error.code : 'bridge_failed');
     return original;
@@ -362,14 +393,20 @@ export async function doctor(rawConfig = {}, env = process.env) {
     available: value.transport === 'cli' ? Boolean(launch) && !compatibilityReason :
       Boolean(env[config.provider === id ? config.apiKeyEnv ?? value.apiKeyEnv : value.apiKeyEnv]),
     authenticationTested: false,
+    operations: { supported: Boolean(value.model) && !value.localSessionHistory,
+      reason: value.localSessionHistory ? 'local_history_not_allowed' : !value.model ? 'economy_not_reviewed' : null,
+      effectiveModel: value.model ?? null },
     ...(id === 'gemini-cli' ? { installed: Boolean(launch), requiredVersion: GEMINI_VERSION, version, compatibilityReason } : {}),
   }; }));
   return { nodeVersion: process.versions.node, supportedNode: Number(process.versions.node.split('.')[0]) >= 20,
     configuredProvider: config.provider, configuredModel: config.model, timeoutMs: config.timeoutMs,
+    requestProtocol: { versions: [1], operations: ['dictate', 'rewrite', 'snippet_assist'],
+      economyOnly: true, localSessionHistoryAllowed: false, localSnippets: true, providerMemoryAvailable: false },
     autoOrder: ['claude', 'codex'], providers, notes: [
       'Read-only local availability check. No authentication or model request was made.',
-      'gemini-cli explicitly reuses an existing Google OAuth login on the reviewed CLI version; Gemini may retain local session history.',
+      'Gemini CLI is unavailable to Sona operations, including legacy raw cleanup, because it retains local session history. Its saved configuration still loads.',
       'gemini, grok, Kimi, and OpenCode remain explicit API adapters. Grok CLI integration is not implemented.',
-      'No automatic API selection or fallback to another model/provider. Plain text survives all failures.',
+      'All Sona requests use reviewed economy presets and ignore saved model overrides. Custom has no reviewed economy preset and is unavailable.',
+      'No automatic API selection or provider/model retries. Dictation failures preserve raw text; rewrite/setup failures return no insertable text.',
     ] };
 }

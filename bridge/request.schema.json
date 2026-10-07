@@ -1,0 +1,187 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Sona version 1 operation request",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "operation": {
+          "const": "dictate"
+        },
+        "transcript": {
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "prose",
+            "strict"
+          ]
+        },
+        "cleanupEnabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "transcript",
+        "mode",
+        "cleanupEnabled"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "operation": {
+          "const": "rewrite"
+        },
+        "selection": {
+          "type": "string",
+          "minLength": 1
+        },
+        "instruction": {
+          "type": "string",
+          "minLength": 1
+        },
+        "profile": {
+          "const": "assistant"
+        },
+        "options": {
+          "$ref": "config.schema.json#/$defs/assistantOptions"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "selection",
+        "instruction"
+      ],
+      "dependentRequired": {
+        "options": [
+          "profile"
+        ]
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "operation": {
+          "const": "snippet_assist"
+        },
+        "context": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "context"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "operation",
+        "intent",
+        "instruction",
+        "images"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "operation": {
+          "const": "assistant"
+        },
+        "intent": {
+          "const": "screen_ask"
+        },
+        "instruction": {
+          "type": "string",
+          "maxLength": 65536,
+          "minLength": 1
+        },
+        "options": {
+          "$ref": "config.schema.json#/$defs/assistantOptions"
+        },
+        "images": {
+          "type": "array",
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "mimeType",
+              "dataBase64"
+            ],
+            "properties": {
+              "mimeType": {
+                "enum": [
+                  "image/png",
+                  "image/jpeg"
+                ]
+              },
+              "dataBase64": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "messages": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "role",
+              "content"
+            ],
+            "properties": {
+              "role": {
+                "enum": [
+                  "user",
+                  "assistant"
+                ]
+              },
+              "content": {
+                "type": "string",
+                "maxLength": 16384
+              }
+            }
+          }
+        },
+        "context": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "appName": {
+              "type": "string",
+              "maxLength": 2000
+            },
+            "windowTitle": {
+              "type": "string",
+              "maxLength": 2000
+            }
+          }
+        }
+      }
+    }
+  ],
+  "description": "One JSON request up to 6 MiB. Normal input text is at most 64 KiB UTF-8; PNG/JPEG screenshots are at most 4 MiB decoded combined. Temporary history has at most 16 messages, 16 KiB each and 32 KiB combined. Runtime enforces byte limits and controls. No image/request/history file is written. Dictate and snippet_assist reject assistant profile/options. Assistant is read-only and accepts only screen_ask; no app inventory or execution instructions are accepted."
+}

@@ -11,6 +11,16 @@ import Foundation
 
 let arguments = CommandLine.arguments
 
+if arguments.contains("--recording-surface-selftest") { MainActor.assumeIsolated { RecordingSurfaceSelfTest.run() } }
+
+// Retired switches fail explicitly instead of starting a hidden second feature.
+if arguments.contains(where: { $0.hasPrefix("--assistant-") || $0 == "--command-hotkey" || $0 == "--request-screen-permission" }) {
+    print("Sona now has one dictation hotkey. The second hotkey and Assistant have been removed."); exit(2)
+}
+
+if arguments.contains("--owned-correction-editor") { MainActor.assumeIsolated { CorrectionSelfTest.run(host:false) } }
+if arguments.contains("--correction-selftest") { MainActor.assumeIsolated { CorrectionSelfTest.run(host:true) } }
+
 if arguments.contains("--insertion-selftest") { MainActor.assumeIsolated { InsertionSelfTest.run() } }
 
 // Read-only destination diagnosis. Never prints field contents or document names.
@@ -42,6 +52,10 @@ if arguments.contains("--configure") {
         guard let binding = HotKeyBinding(hotkey) else { fputs("Invalid hotkey.\n",stderr); exit(1) }
         config.hotkey = binding.name
     }
+    if let value = option("--auto-add-to-dictionary") {
+        guard ["true","false"].contains(value) else { fputs("Use true or false.\n",stderr); exit(1) }
+        config.autoAddToDictionary = value == "true"
+    }
     if let provider = option("--provider") {
         guard ["auto","none","claude","codex","gemini-cli","gemini","kimi","grok","openai","anthropic","opencode","custom"].contains(provider) else { fputs("Unknown provider.\n",stderr); exit(1) }
         if config.ai.provider != provider {
@@ -56,7 +70,7 @@ if arguments.contains("--configure") {
     if let model = option("--model") { config.ai.model = model }
     if let sound = option("--sound") { config.sound = sound; config.startSound = nil; config.stopSound = nil }
     config.setupComplete = true
-    config.save()
+    if let error = config.save() { fputs(error + "\n",stderr); exit(1) }
     print("Sona configured: hotkey=\(config.hotkey), provider=\(config.ai.provider), model=\(config.ai.model)")
     exit(0)
 }
@@ -228,6 +242,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let state = AppState()
         state.start()
         self.state = state
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        state?.reopen()
+        return false
     }
 }
 

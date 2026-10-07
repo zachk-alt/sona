@@ -73,6 +73,8 @@ struct InsertionTests {
         var postSucceeds = true
         var captureCount = 0
         var switchAfterFirstCheck = false
+        var snapshotFailure: ClipboardSnapshot.Failure?
+        var copyDuringSnapshot = false
         let coordinator = InsertionCoordinator(pasteboard: board, currentTarget: {
             captureCount += 1
             if switchAfterFirstCheck && captureCount % 2 == 0 { return target(element: otherField) }
@@ -80,7 +82,15 @@ struct InsertionTests {
         }, postPaste: { pid in
             if postSucceeds { posts.append(pid) }
             return postSucceeds
-        }, scheduleRestore: { actions.append($0) })
+        }, scheduleRestore: { actions.append($0) }, captureClipboard: { pasteboard in
+            if let snapshotFailure { return .failure(snapshotFailure) }
+            let result = ClipboardSnapshot.captureResult(pasteboard)
+            if copyDuringSnapshot {
+                pasteboard.clearContents()
+                pasteboard.setString("new copy during snapshot", forType: .string)
+            }
+            return result
+        })
         var pendingNotifications = 0
         coordinator.onPendingChanged = { pendingNotifications += 1 }
         func setString(_ value: String) {
@@ -109,6 +119,7 @@ struct InsertionTests {
         check(board.writeObjects([rich, file]), "multiple original items")
         let saved = snapshotData()
         check(coordinator.insert("first", into: original) == .paste, "same target pastes")
+        check(coordinator.lastPendingReason == nil, "successful paste has no pending reason")
         check(posts == [1], "paste addressed only to captured PID")
         check(board.string(forType: .string) == "first", "temporary dictation clipboard")
         drainRestores()
@@ -142,9 +153,11 @@ struct InsertionTests {
         current = target(element: otherField)
         let untouched = board.changeCount
         check(coordinator.insert("pending field", into: original) == .pending, "field change retains result")
+        check(coordinator.lastPendingReason == .targetChanged(.initial, .fieldChanged), "initial field mismatch has fixed reason")
         check(board.changeCount == untouched && posts.count == postCount, "rejected field never touches clipboard or posts")
         current = target(pid: 2)
         check(coordinator.insert("pending app", into: original) == .pending, "app change retains result")
+        check(coordinator.lastPendingReason == .targetChanged(.initial, .applicationChanged), "app mismatch is distinguished")
         current = nil
         check(coordinator.insert("pending unknown", into: original) == .pending, "unknown focus retains result")
         current = original
@@ -153,15 +166,18 @@ struct InsertionTests {
         captureCount = 0
         switchAfterFirstCheck = true
         check(coordinator.insert("pending race", into: original) == .pending, "field change during clipboard work retained")
+        check(coordinator.lastPendingReason == .targetChanged(.final, .fieldChanged), "final field mismatch has fixed reason")
         check(board.string(forType: .string) == "rapid baseline" && posts.count == postCount, "second guard restores clipboard before any key")
         switchAfterFirstCheck = false
         postSucceeds = false
         check(coordinator.insert("pending post failure", into: original) == .pending, "event creation failure retained")
+        check(coordinator.lastPendingReason == .pasteEventFailed, "event dispatch failure is distinguished")
         check(board.string(forType: .string) == "rapid baseline", "event failure restores clipboard")
         postSucceeds = true
         check(coordinator.pendingCount == 6 && pendingNotifications == 6, "all pending recordings retained with notifications")
         check(coordinator.hasPendingText, "pending recovery exposed")
         check(coordinator.insert("active paste", into: original) == .paste, "paste before recovery")
+        check(coordinator.lastPendingReason == nil, "successful attempt clears stale failure reason")
         check(coordinator.copyPendingToClipboard(), "explicit recovery succeeds")
         let recovered = "pending field\n\npending app\n\npending unknown\n\npending missing target\n\npending race\n\npending post failure"
         check(board.string(forType: .string) == recovered, "recovery preserves order and content")
@@ -197,14 +213,65 @@ struct InsertionTests {
         compatibilityCurrent = compatibility(activity: movedActivity)
         let beforeActivityRefusal = board.changeCount
         check(compatibilityCoordinator.insert("pending after input", into: coarse) == .pending, "activity change before preparation retains words")
+        check(compatibilityCoordinator.lastPendingReason == .targetChanged(.initial, .activityChanged), "initial compatibility activity reason")
         check(board.changeCount == beforeActivityRefusal && compatibilityPosts == [1], "first activity guard never changes clipboard or posts")
         compatibilityCurrent = coarse; compatibilityReads = 0; activityChangesAtSecondCheck = true
         check(compatibilityCoordinator.insert("pending activity race", into: coarse) == .pending, "activity change during preparation retains words")
+        check(compatibilityCoordinator.lastPendingReason == .targetChanged(.final, .activityChanged), "final compatibility activity reason")
         check(board.string(forType: .string) == "compatibility baseline" && compatibilityPosts == [1], "final activity guard restores clipboard and posts nothing")
         compatibilityReads = 0; userCopiesAtSecondCheck = true
         check(compatibilityCoordinator.insert("pending new copy", into: coarse) == .pending, "activity and user copy during preparation retain words")
         check(board.string(forType: .string) == "new user copy" && compatibilityPosts == [1], "final guard cannot overwrite new clipboard ownership")
         check(compatibilityCoordinator.pendingCount == 3, "all compatibility refusals remain recoverable")
+        current = original; postSucceeds = true
+        let selectionBaselinePosts = posts.count
+        let selectionBaselineClipboard = board.changeCount
+        check(coordinator.insert("  rewritten\n",into:original,validateSelection:{ false }) == .pending,"selection refused before staging")
+        check(coordinator.lastPendingReason == .selectionChanged(.initial), "initial selection failure distinguished")
+        check(posts.count == selectionBaselinePosts && board.changeCount == selectionBaselineClipboard,"initial selection refusal makes zero writes")
+        var selectionReads = 0
+        check(coordinator.insert("  rewritten\n",into:original,validateSelection:{ selectionReads += 1; return selectionReads == 1 }) == .pending,"selection changes during clipboard preparation")
+        check(coordinator.lastPendingReason == .selectionChanged(.final), "final selection failure distinguished")
+        check(posts.count == selectionBaselinePosts,"selection race makes zero target writes")
+        check(coordinator.insert("  rewritten\n",into:original,validateSelection:{ true }) == .paste,"one validated complete replacement")
+        check(posts.count == selectionBaselinePosts + 1 && board.string(forType:.string) == "  rewritten\n","single dispatch preserves replacement whitespace")
+        drainRestores()
+
+        // A failed snapshot never authorizes destroying the user's clipboard.
+        // Inject only the snapshot result; the coordinator and private board are real.
+        setString("unreadable clipboard baseline")
+        let unreadableBaseline = board.changeCount
+        let beforeSnapshotFailurePosts = posts.count
+        let beforeSnapshotFailurePending = coordinator.pendingCount
+        snapshotFailure = .unreadable
+        check(coordinator.insert("unreadable recovery", into: original) == .pending, "unreadable clipboard retains dictation")
+        check(coordinator.lastPendingReason == .clipboardUnreadable, "unreadable clipboard has fixed reason")
+        check(board.changeCount == unreadableBaseline && board.string(forType: .string) == "unreadable clipboard baseline", "unreadable clipboard stays untouched")
+        check(posts.count == beforeSnapshotFailurePosts && coordinator.pendingCount == beforeSnapshotFailurePending + 1, "unreadable clipboard posts nothing and retains complete result")
+        snapshotFailure = .changed
+        check(coordinator.insert("changed snapshot recovery", into: original) == .pending, "changed snapshot retains dictation")
+        check(coordinator.lastPendingReason == .clipboardChanged, "snapshot ownership race distinguished from unreadable data")
+        check(board.changeCount == unreadableBaseline && posts.count == beforeSnapshotFailurePosts, "failed snapshot never modifies clipboard or posts")
+        snapshotFailure = nil
+        copyDuringSnapshot = true
+        check(coordinator.insert("copy during snapshot recovery", into: original) == .pending, "real clipboard change after snapshot retains dictation")
+        check(coordinator.lastPendingReason == .clipboardChanged, "post-snapshot ownership race has fixed reason")
+        check(board.string(forType: .string) == "new copy during snapshot" && posts.count == beforeSnapshotFailurePosts, "new user copy remains intact")
+        copyDuringSnapshot = false
+        check(coordinator.insert("recovered clipboard", into: original) == .paste && coordinator.lastPendingReason == nil, "readable clipboard recovers without stale reason")
+        drainRestores()
+        check(board.string(forType: .string) == "new copy during snapshot", "recovered paste preserves new clipboard")
+
+        let diagnosticReasons: [(InsertionPendingReason, String)] = [
+            (.selectionChanged(.initial), "selection_initial"), (.selectionChanged(.final), "selection_final"),
+            (.targetChanged(.initial, .activityChanged), "target_initial_activityChanged"),
+            (.targetChanged(.final, .windowChanged), "target_final_windowChanged"),
+            (.clipboardUnreadable, "clipboard_unreadable"), (.clipboardChanged, "clipboard_changed"),
+            (.clipboardWriteFailed, "clipboard_write_failed"), (.pasteEventFailed, "paste_event_failed")
+        ]
+        for (reason, code) in diagnosticReasons {
+            check(reason.diagnosticCode == code, "diagnostic code contains only fixed reason values")
+        }
         print("PASS: \(assertions) focus and clipboard assertions, no real focus queries, keyboard events, or general clipboard access")
     }
 }

@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import ApplicationServices
 import Foundation
 
 /// Wires the hotkey to the microphone, the transcriber, the cleanup pass and
@@ -19,7 +20,12 @@ final class AppState {
     private let cue = Cue()
     private let capture = AudioCapture()
     private let transcriber: Transcriber = AppleTranscriber()
-    private var cleanup: CleanupService
+    private var operations: BridgeOperations
+    private var textSettings: TextSettingsController?
+    private let corrections = CorrectionObservation()
+    private var correctionSuggestion: String?
+    private var observationBaseline: SelectionSnapshot?
+    private var sessionFailure: String?
     private var hotKey: HotKeyMonitor?
     private var hotkeySettings: HotKeySettings?
     private var backendLabel = "Plain dictation"
@@ -35,55 +41,108 @@ final class AppState {
     init() {
         config = Config.load()
         let selected = Self.makeCleanup(config)
-        cleanup = selected.0
+        operations = selected.0
         backendLabel = selected.1
     }
 
-    private static func makeCleanup(_ config: Config) -> (CleanupService, String) {
-        if config.ai.provider == "none" { return (PassthroughCleanupService(), "Plain dictation") }
-        if ["auto", "claude"].contains(config.ai.provider), config.ai.model == "economy",
-           let service = ClaudeCleanupService(vocabulary:config.vocabulary, overridePath:config.ai.executable ?? config.claudePath) {
-            return (service, "Claude CLI (Haiku)")
-        }
+    private static func makeCleanup(_ config: Config) -> (BridgeOperations, String) {
         let resources = Bundle.main.resourceURL
         let bridge = resources?.appendingPathComponent("bridge/sona-cleanup.mjs")
             ?? URL(fileURLWithPath:FileManager.default.currentDirectoryPath).appendingPathComponent("bridge/sona-cleanup.mjs")
-        let bundledNode = resources?.appendingPathComponent("runtime/node").path
-        let node = bundledNode.flatMap { FileManager.default.isExecutableFile(atPath:$0) ? $0 : nil } ?? CLIResolver.resolve("node")
-        guard let node, FileManager.default.fileExists(atPath:bridge.path) else {
-            return (PassthroughCleanupService(), "Plain dictation (AI runtime unavailable)")
-        }
-        return (BridgeCleanupService(configPath:Config.configURL.path, bridgePath:bridge.path, nodePath:node, timeout:Double(config.ai.timeoutMs)/1000+2),
-                config.ai.provider == "auto" ? "Automatic CLI, economy model" : "\(config.ai.provider.capitalized), \(config.ai.model)")
+        let bundled = resources?.appendingPathComponent("runtime/node").path
+        let node = bundled.flatMap { FileManager.default.isExecutableFile(atPath:$0) ? $0 : nil } ?? CLIResolver.resolve("node")
+        let label = config.ai.provider == "none" ? "Plain dictation and saved phrases" : "\(config.ai.provider.capitalized), \(config.ai.model)"
+        return (BridgeOperations(node:node,bridge:bridge.path,timeout:Double(config.ai.timeoutMs)/1000+2),label)
     }
 
+    private func makeMonitor() -> HotKeyMonitor? {
+        guard let primary = HotKeyBinding(config.hotkey) else { return nil }
+        return HotKeyMonitor(binding:primary) { [weak self] event in
+            self?.handle(event) ?? false
+        }
+    }
+    private func resumeHotkeys() {
+        statusBar.setHotkey(config.hotkey)
+        let monitor = makeMonitor()
+        if monitor?.start() == true { hotKey = monitor }
+    }
     private func showHotkeySettings() {
-        guard phase == .idle, hotkeySettings == nil else { NSSound.beep(); return }
-        hotKey?.stop(); hotKey = nil
+        guard phase == .idle, hotkeySettings == nil, textSettings == nil else { NSSound.beep(); return }
+        corrections.stop(); hotKey?.stop(); hotKey = nil
         let controller = HotKeySettings(current:config.hotkey) { [weak self] name in
             guard let self else { return }
-            if let name { self.config.hotkey = name; self.config.setupComplete = true; self.config.save() }
-            self.hotkeySettings = nil
-            self.statusBar.setHotkey(self.config.hotkey)
-            let monitor = HotKeyMonitor(binding:HotKeyBinding(self.config.hotkey) ?? HotKeyBinding("right-command")!) { [weak self] event in self?.handle(event) ?? false }
-            if monitor.start() { self.hotKey = monitor }
+            if let name {
+                var next = self.config
+                next.hotkey = name
+                next.setupComplete = true
+                if let error = next.save() { self.statusBar.showError(error) } else { self.config = next }
+            }
+            self.hotkeySettings = nil; self.resumeHotkeys()
         }
-        hotkeySettings = controller
-        controller.present()
+        hotkeySettings = controller; controller.present()
+    }
+    private func showTextSettings(assist: Bool = false) {
+        guard phase == .idle, hotkeySettings == nil, textSettings == nil else { NSSound.beep(); return }
+        corrections.stop(); hotKey?.stop(); hotKey = nil
+        let controller = TextSettingsController(vocabulary:config.vocabulary,snippets:config.snippets,
+            autoAddToDictionary:config.autoAddToDictionary,assistEnabled:config.ai.provider != "none",onSave:{ [weak self] words,snippets,enabled in
+                guard let self else { return "Settings are no longer available." }
+                var next = self.config; next.vocabulary = words; next.snippets = snippets; next.autoAddToDictionary = enabled
+                if let error = next.save() { return error }
+                self.config = next; self.corrections.enabled = enabled
+                if !enabled { self.correctionSuggestion = nil; self.statusBar.setCorrectionAvailable(false) }
+                return nil
+            },onSuggest:{ [weak self] context,completion in
+                guard let self, self.config.ai.provider != "none" else { completion(nil,"Choose an AI provider to request suggestions."); return }
+                Task { @MainActor in
+                    let result = await self.operations.perform(.init(operation:"snippet_assist",context:context))
+                    guard self.textSettings != nil else { return }
+                    completion(result.status == "ok" ? result.snippets : nil,result.status == "ok" ? nil : "Suggestions are unavailable. You can add a phrase manually.")
+                }
+            },onClose:{ [weak self] in
+                guard let self else { return }; self.operations.cancel(); self.textSettings = nil; self.resumeHotkeys()
+            })
+        textSettings = controller; controller.present(showAssist:assist)
+    }
+    private func reviewCorrection() {
+        guard phase == .idle, let word = correctionSuggestion else { return }
+        corrections.stop()
+        let alert = NSAlert(); alert.messageText = "Add this spelling to your vocabulary?"
+        alert.informativeText = word; alert.addButton(withTitle:"Add spelling"); alert.addButton(withTitle:"Cancel")
+        NSApp.activate(ignoringOtherApps:true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            var next = config
+            if !next.vocabulary.contains(word) { next.vocabulary.append(word) }
+            if let error = next.save() { statusBar.showError(error) } else { config = next }
+        }
+        correctionSuggestion = nil; statusBar.setCorrectionAvailable(false)
     }
 
     // MARK: - Startup
+
+    func reopen() { statusBar.reopenMenu() }
 
     func start() {
         Config.writeTemplateIfMissing()
         // Rewrites the file with every current key so new settings are
         // discoverable, preserving whatever the user set.
-        config.save()
+        if let error = config.save() { Log.write("config: settings could not be saved"); statusBar.showError(error) }
         Log.write("config: \(config.vocabulary.count) vocabulary terms, sound=\(config.sound ?? "default")")
 
         statusBar.setBackend(backendLabel)
         statusBar.setHotkey(config.hotkey)
         statusBar.onChangeHotkey = { [weak self] in self?.showHotkeySettings() }
+        statusBar.onTextSettings = { [weak self] in self?.showTextSettings() }
+        if config.ai.provider == "none" {
+            statusBar.onSuggestSnippets = nil
+        } else {
+            statusBar.onSuggestSnippets = { [weak self] in self?.showTextSettings(assist:true) }
+        }
+        statusBar.onReviewCorrection = { [weak self] in self?.reviewCorrection() }
+        corrections.enabled = config.autoAddToDictionary
+        corrections.onSuggestion = { [weak self] word in
+            self?.correctionSuggestion = word; self?.statusBar.setCorrectionAvailable(true)
+        }
         statusBar.onCopyPending = { TextInserter.copyPendingToClipboard() }
         TextInserter.onPendingChanged = { [weak self] in
             self?.statusBar.setPendingText(TextInserter.hasPendingText)
@@ -92,9 +151,9 @@ final class AppState {
         statusBar.onQuit = { NSApp.terminate(nil) }
         statusBar.onToggleCleanup = { [weak self] in
             guard let self else { return }
-            config.cleanupEnabled.toggle()
-            config.save()
-            statusBar.setCleanupEnabled(config.cleanupEnabled)
+            var next = config; next.cleanupEnabled.toggle()
+            if let error = next.save() { statusBar.showError(error); return }
+            config = next; statusBar.setCleanupEnabled(config.cleanupEnabled)
         }
         statusBar.onToggleLoginItem = { [weak self] in
             LoginItem.setEnabled(!LoginItem.isEnabled)
@@ -119,8 +178,9 @@ final class AppState {
                             current: config.sound ?? Cue.defaultChoice)
         statusBar.onSelectSound = { [weak self] id in
             guard let self else { return }
-            config.sound = id
-            config.save()
+            var next = config; next.sound = id
+            if let error = next.save() { statusBar.showError(error); return }
+            config = next
             cue.setSound(id)
             cue.start()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) { self.cue.stop() }
@@ -137,16 +197,14 @@ final class AppState {
         Log.write("launch: bundle=\(Bundle.main.bundleURL.path) AXIsProcessTrusted=\(trusted) " +
                   "postEvent=\(CGPreflightPostEventAccess()) listenEvent=\(CGPreflightListenEventAccess())")
 
-        let monitor = HotKeyMonitor(binding: HotKeyBinding(config.hotkey) ?? HotKeyBinding("right-command")!) { [weak self] event in
-            self?.handle(event) ?? false
-        }
-        let created = monitor.start()
+        let monitor = makeMonitor()
+        let created = monitor?.start() == true
         Log.write("launch: tapCreate=\(created) cleanup=\(config.ai.provider)")
 
         if created && trusted {
             hotKey = monitor
         } else {
-            monitor.stop()
+            monitor?.stop()
             requestAccessibility(tapCreated: created)
         }
         if !config.setupComplete {
@@ -156,7 +214,7 @@ final class AppState {
 
     // MARK: - Hotkey
 
-    /// Returns false only for a `.begin` the app declines to act on.
+    /// Returns false only for a gesture the app declines to act on.
     private func handle(_ event: HotKeyEvent) -> Bool {
         switch event {
         case .begin:
@@ -181,6 +239,9 @@ final class AppState {
         if phase == .armed || phase == .recording { return true }
         guard phase == .idle else { return false }
 
+        corrections.stop(); correctionSuggestion = nil; statusBar.setCorrectionAvailable(false)
+        sessionFailure = nil; observationBaseline = nil
+
         // Nothing typeable under the cursor means the user wants Command for
         // something else. Decline the press outright: no sound, no mic, no
         // panel, and the release is ignored too.
@@ -195,10 +256,11 @@ final class AppState {
         }
         let binding = HotKeyBinding(config.hotkey) ?? HotKeyBinding("right-command")!
         FocusedElement.beginTrackingActivity { event in
-            !binding.isModifier && Int64(event.keyCode) == binding.keyCode
-                && binding.matches(flags: CGEventFlags(rawValue: UInt64(event.modifierFlags.rawValue)))
+            TextInserter.isOwnPasteEvent(event) || (!binding.isModifier && Int64(event.keyCode) == binding.keyCode
+                && binding.matches(flags: CGEventFlags(rawValue: UInt64(event.modifierFlags.rawValue))))
         }
         insertionTarget = FocusedElement.captureTarget()
+        if config.autoAddToDictionary { observationBaseline = SelectionSnapshot.emptyFieldBaseline() }
         Log.write("insert target: \(insertionTarget?.element == nil ? "window compatibility" : "Accessibility field")")
         phase = .armed
 
@@ -218,9 +280,7 @@ final class AppState {
             // Cleanup mode comes from whatever app is in front, decided before
             // the user speaks so the pre-warmed process has the right prompt.
             sessionMode = currentMode()
-            if config.cleanupEnabled {
-                cleanup.prewarm(mode: sessionMode)
-            }
+
             microphoneStart = Task { await self.openMicrophone() }
         }
         pendingMicStart = work
@@ -294,7 +354,7 @@ final class AppState {
         pendingMicStart = nil
         microphoneStart?.cancel()
         capture.stop()
-        cleanup.shutdown()
+        operations.cancel()
         let opening = microphoneStart
         Task {
             _ = await opening?.value
@@ -308,12 +368,12 @@ final class AppState {
         pendingMicStart?.cancel()
         pendingMicStart = nil
         microphoneStart = nil
-        cleanup.shutdown()
+        operations.cancel()
         phase = .idle
         insertionTarget = nil
         FocusedElement.endTrackingActivity()
         hotKey?.resetGesture()
-        statusBar.showIdle()
+        if let sessionFailure { statusBar.showError(sessionFailure) } else { statusBar.showIdle() }
     }
 
     // MARK: - The pipeline
@@ -327,34 +387,27 @@ final class AppState {
             await transcriber.cancel()
             return
         }
+        guard phase == .processing else { return }
         Log.write("transcribe: \(raw.count) chars")
         guard !raw.isEmpty else { return }
 
-        // Cleanup is an enhancement, never a dependency. Any failure, timeout
-        // or missing CLI falls through to the words the user actually said.
-        var text = raw
-        if config.cleanupEnabled {
-            do {
-                text = try await cleanup.clean(raw, mode: mode)
-            } catch {
-                let reason: String
-                switch error {
-                case CleanupError.unavailable: reason = "CLI unavailable"
-                case CleanupError.timedOut: reason = "timed out"
-                case CleanupError.badResponse: reason = "invalid response"
-                case is CancellationError: reason = "cancelled"
-                default: reason = "failed"
-                }
-                Log.write("cleanup: \(reason), using raw transcript")
-            }
+        // Dictation retains the exact raw local text on any cleanup failure.
+        let request = BridgeRequest(operation:"dictate",transcript:raw,
+            mode:mode == .strict ? "strict" : "prose",cleanupEnabled:config.cleanupEnabled)
+        let result = await operations.perform(request)
+        let text = result.insertionText(raw:raw,isRewrite:false) ?? raw
+        let method = TextInserter.insert(text,into:insertionTarget)
+        Log.write("insert: \(method.rawValue) (\(text.count) chars)")
+        if let reason = TextInserter.lastPendingReason { Log.write("insert blocked: \(reason.diagnosticCode)") }
+        if method == .pending {
+            sessionFailure = "Text is ready in Copy pending text."
         }
-
-        let method = TextInserter.insert(text, into: insertionTarget)
-        Log.write("insert: \(method.rawValue) \(text.count) chars")
         if method == .paste {
-            // The target can read the pasteboard up to 385 ms after Cmd-V.
-            // Keep processing visible until that asynchronous insertion settles.
-            try? await Task.sleep(nanoseconds: 450_000_000)
+            try? await Task.sleep(for:.milliseconds(250))
+            if config.autoAddToDictionary, let baseline = observationBaseline {
+                corrections.verifyAndBegin(text:text,before:baseline)
+            }
+            try? await Task.sleep(for:.milliseconds(200))
         }
     }
 
@@ -383,10 +436,8 @@ final class AppState {
             timer.invalidate()
             Task { @MainActor in
                 guard let self, self.hotKey == nil else { return }
-                let monitor = HotKeyMonitor(binding: HotKeyBinding(self.config.hotkey) ?? HotKeyBinding("right-command")!) { [weak self] event in
-                    self?.handle(event) ?? false
-                }
-                if monitor.start() {
+                let monitor = self.makeMonitor()
+                if monitor?.start() == true {
                     self.hotKey = monitor
                     self.statusBar.setBackend(
                         self.backendLabel)

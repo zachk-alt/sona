@@ -69,7 +69,7 @@ final class BridgeCleanupService: CleanupService {
 
 /// Nonblocking POSIX I/O keeps both pipe directions and cancellation bounded.
 /// No transcript is written to a file, argv, diagnostics, or a shell command.
-private final class CleanupBridgeRun: @unchecked Sendable {
+final class CleanupBridgeRun: @unchecked Sendable {
     private let nodePath: String
     private let arguments: [String]
     private let input: String
@@ -84,7 +84,7 @@ private final class CleanupBridgeRun: @unchecked Sendable {
     func cancel() { lock.lock(); cancelled = true; lock.unlock() }
     private var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
 
-    func perform() -> String {
+    func perform(validateGrowth: Bool = true) -> String {
         if isCancelled { return input }
         let process = Process(), inPipe = Pipe(), outPipe = Pipe()
         process.executableURL = URL(fileURLWithPath: nodePath)
@@ -141,7 +141,7 @@ private final class CleanupBridgeRun: @unchecked Sendable {
         guard process.terminationReason == .exit, process.terminationStatus == 0,
               let text = String(data: output, encoding: .utf8),
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              text.utf8.count <= max(input.utf8.count * 3, input.utf8.count + 40) else { return input }
+              (!validateGrowth || text.utf8.count <= max(input.utf8.count * 3, input.utf8.count + 40)) else { return input }
         return text
     }
 }

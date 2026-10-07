@@ -40,10 +40,9 @@ jobs:
           if (-not $process.WaitForExit(600000)) { Stop-Process -Id $process.Id; throw 'Windows self-test exceeded ten minutes.' }
           if (Test-Path $report) {
             Get-Content $report
-            $result = Get-Content $report -Raw | ConvertFrom-Json
-            if ($result.status -eq 'partial') { Write-Warning 'Windows runtime validation is partial. Inspect skipped GUI checks before making desktop runtime claims.' }
           }
           if ($process.ExitCode -ne 0) { throw "Windows self-test failed: $($process.ExitCode)" }
+          & ./windows/scripts/assert-runtime-qa.ps1 -Report $report
       - name: Validate PowerShell scripts
         shell: pwsh
         run: |

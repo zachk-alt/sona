@@ -8,17 +8,19 @@ final class HotKeySettings: NSWindowController, NSWindowDelegate {
     private var monitor: Any?
     private var recording = false
     private var pendingModifier: String?
+    private var instructions = "Tap to start, tap again to finish. Or hold to talk."
     private let completion: (String?) -> Void
     private var finished = false
 
     init(current: String, completion: @escaping (String?) -> Void) {
         self.completion = completion
         let window = NSWindow(contentRect: NSRect(x:0,y:0,width:440,height:248), styleMask:[.titled,.closable], backing:.buffered, defer:false)
-        window.title = "Sona hotkey"
+        window.title = "Sona dictation hotkey"
         window.isReleasedWhenClosed = false
         super.init(window:window)
         window.delegate = self
         field.stringValue = current
+        message.stringValue = instructions
         field.placeholderString = "right-command or option+space"
         let title = NSTextField(labelWithString: "Choose your dictation hotkey")
         title.font = .systemFont(ofSize:19,weight:.semibold)
@@ -57,7 +59,7 @@ final class HotKeySettings: NSWindowController, NSWindowDelegate {
     private func stopRecording() {
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil; recording = false; pendingModifier = nil
-        message.stringValue = "Tap to start, tap again to finish. Or hold to talk."
+        message.stringValue = instructions
     }
     @objc private func saveShortcut() {
         guard let binding = HotKeyBinding(field.stringValue) else {

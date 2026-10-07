@@ -5,7 +5,18 @@ namespace Sona.Windows;
 internal static class Native
 {
     public const int GwlExStyle = -20, WsExNoActivate = 0x08000000, WsExToolWindow = 0x80;
+    public const int WhMouseLl = 14;
     public const int WhKeyboardLl = 13, WmKeydown = 0x100, WmKeyup = 0x101, WmSyskeydown = 0x104, WmSyskeyup = 0x105, WmHotkey = 0x312;
+    [DllImport("user32.dll")] public static extern nint GetKeyboardLayout(uint thread);
+    public delegate void WinEventProc(nint hook, uint evt, nint window, int objectId, int childId, uint thread, uint time);
+    [DllImport("user32.dll")] public static extern nint SetWinEventHook(uint min, uint max, nint module, WinEventProc callback, uint process, uint thread, uint flags);
+    [DllImport("user32.dll")] public static extern bool UnhookWinEvent(nint hook);
+    public static bool StandardUsLayout() => Sona.Core.ShortcutPolicy.RightAltCommandAllowed((uint)GetKeyboardLayout(GetWindowThreadProcessId(GetForegroundWindow(), out _)).ToInt64());
+    public static bool MenuActive()
+    {
+        var info = new GuiThreadInfo { Size = Marshal.SizeOf<GuiThreadInfo>() };
+        return !GetGUIThreadInfo(GetWindowThreadProcessId(GetForegroundWindow(), out _), ref info) || (info.Flags & 0x1C) != 0;
+    }
     public delegate nint HookProc(int code, nint wParam, nint lParam);
     [DllImport("user32.dll")] public static extern nint GetForegroundWindow();
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(nint window, out uint process);
@@ -25,6 +36,11 @@ internal static class Native
     [DllImport("user32.dll")] public static extern bool IsWindow(nint window);
     [DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(nint window, int attribute, ref int value, int size);
 
+    [StructLayout(LayoutKind.Sequential)] public struct Message { public nint Window; public uint Id; public nuint WParam; public nint LParam; public uint Time; public int X, Y; public uint Private; }
+    [DllImport("user32.dll")] private static extern bool PeekMessage(out Message message, nint window, uint min, uint max, uint remove);
+    [DllImport("user32.dll")] private static extern bool TranslateMessage(ref Message message);
+    [DllImport("user32.dll")] private static extern nint DispatchMessage(ref Message message);
+    public static void PumpMessages() { while (PeekMessage(out var message, 0, 0, 0, 1)) { TranslateMessage(ref message); DispatchMessage(ref message); } }
     [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left, Top, Right, Bottom; }
     [StructLayout(LayoutKind.Sequential)] public struct GuiThreadInfo
     {

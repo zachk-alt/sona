@@ -2,7 +2,7 @@ import AppKit
 import CoreGraphics
 
 /// What the selected shortcut just asked for.
-enum HotKeyEvent {
+enum HotKeyEvent: Equatable {
     /// Key went down. Arm capture (the mic opens after a short delay).
     case begin
     /// Held key released after a real interval. Finish and transcribe.
@@ -14,6 +14,7 @@ enum HotKeyEvent {
     /// A keyboard shortcut: some other key was struck while Command was down.
     /// Nothing to do with dictation. Throw it away.
     case discard
+
 }
 
 /// A physical key with optional modifiers. No typed text is retained.

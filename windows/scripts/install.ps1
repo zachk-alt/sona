@@ -46,6 +46,10 @@ try {
     Expand-Archive -LiteralPath $PackagePath -DestinationPath $staged
     if (-not (Test-Path -LiteralPath (Join-Path $staged 'Sona.exe')) -or -not (Test-Path -LiteralPath (Join-Path $staged 'bridge\sona-cleanup.mjs')) -or -not (Test-Path -LiteralPath (Join-Path $staged 'bridge\gemini-cli.mjs')) -or -not (Test-Path -LiteralPath (Join-Path $staged 'bridge\gemini-launch.mjs')) -or -not (Test-Path -LiteralPath (Join-Path $staged 'bridge\gemini-loader.mjs'))) { throw 'The package is incomplete.' }
 
+    foreach ($required in @('bridge\assistant.mjs','bridge\assistant-transports.mjs','bridge\blender.mjs','bridge\blender-scene.py','bridge\errors.mjs','bridge\snippets.mjs','bridge\operations.mjs','bridge\prompts\rewrite.txt','bridge\prompts\snippet-assist.txt')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $staged $required))) { throw "The package is incomplete: $required" }
+    }
+
     # Node is private to Sona; no PATH change and no global npm installation.
     $nodeVersion = 'v24.20.0'
     $nodeName = "node-$nodeVersion-win-x64.zip"
@@ -87,7 +91,7 @@ try {
     $shortcut.TargetPath = $executable; $shortcut.WorkingDirectory = $install; $shortcut.IconLocation = "$executable,0"; $shortcut.Save()
     Write-Host "Sona installed to $install"
     Write-Host 'First launch lets you choose a shortcut and downloads the verified local speech model (about 148 MB).'
-    Write-Host 'Select Gemini CLI (existing login) in Sona settings to reuse an installed, signed-in Gemini CLI.'
+    Write-Host 'Choose a supported existing AI connection in Settings. Sona uses fixed economical presets and never signs you in.'
     Write-Host 'Enable Microphone access and Let desktop apps access your microphone in Windows Privacy & security settings.'
     if (-not $NoLaunch) { Start-Process $executable }
 } finally {

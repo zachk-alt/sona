@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Sona version 1 operation result",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "operation": {
+          "const": "dictate"
+        },
+        "status": {
+          "const": "ok"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "status",
+        "text"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "operation": {
+          "const": "dictate"
+        },
+        "status": {
+          "const": "fallback"
+        },
+        "text": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "status",
+        "text",
+        "reason"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "operation": {
+          "const": "rewrite"
+        },
+        "status": {
+          "const": "ok"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "status",
+        "text"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "operation": {
+          "const": "snippet_assist"
+        },
+        "status": {
+          "const": "ok"
+        },
+        "snippets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": {
+            "$ref": "config.schema.json#/$defs/snippet"
+          }
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "status",
+        "snippets"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "operation": {
+          "const": "snippet_assist"
+        },
+        "status": {
+          "const": "needs_input"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "status",
+        "reason"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "operation": {
+          "enum": [
+            "dictate",
+            "rewrite",
+            "snippet_assist",
+            "unknown",
+            "assistant"
+          ]
+        },
+        "status": {
+          "const": "error"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "status",
+        "reason"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "operation",
+        "status",
+        "kind",
+        "text"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "operation": {
+          "const": "assistant"
+        },
+        "status": {
+          "const": "ok"
+        },
+        "kind": {
+          "const": "answer"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        }
+      }
+    }
+  ],
+  "description": "Bridge-authored envelope. Only complete ok results have usable content. Assistant returns only kind:answer and text for display in the temporary panel, never insertion or execution. Action, scene and artifact fields are rejected. Failed assistant/rewrite contains no text."
+}

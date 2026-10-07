@@ -11,17 +11,18 @@ namespace Sona.Windows;
 
 internal sealed class RecordingPanel : Window
 {
+    internal const double PanelWidth = 340, PanelHeight = 142;
     private readonly TextBlock title = new() { Foreground = Brushes.White, FontSize = 14, FontWeight = FontWeights.SemiBold };
     private readonly WaveMeter meter = new();
     private readonly TextBlock hint = new() { Foreground = new SolidColorBrush(Color.FromRgb(181, 193, 210)), FontSize = 11, HorizontalAlignment = HorizontalAlignment.Center };
     public RecordingPanel()
     {
-        Width = 340; Height = 142; WindowStyle = WindowStyle.None; ResizeMode = ResizeMode.NoResize;
+        Width = PanelWidth; Height = PanelHeight; WindowStyle = WindowStyle.None; ResizeMode = ResizeMode.NoResize;
         ShowInTaskbar = false; ShowActivated = false; Topmost = true; Focusable = false;
         Background = Brushes.Transparent;
         var content = new StackPanel { Margin = new Thickness(22, 15, 22, 12) };
         var heading = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center };
-        heading.Children.Add(new Image { Source = new BitmapImage(new Uri("pack://application:,,,/Assets/SonaAppIcon.png")), Width = 22, Height = 22, Margin = new Thickness(0, 0, 8, 0) });
+        heading.Children.Add(new Image { Source = new BitmapImage(new Uri("pack://application:,,,/Assets/MenuIconRecording.png")), Width = 22, Height = 22, Margin = new Thickness(0, 0, 8, 0) });
         heading.Children.Add(title); title.VerticalAlignment = VerticalAlignment.Center;
         content.Children.Add(heading); content.Children.Add(meter); content.Children.Add(hint);
         content.Children.Add(new TextBlock { Text = "Sona  ·  Actual Intelligence Labs", Foreground = new SolidColorBrush(Color.FromRgb(146, 160, 178)), FontSize = 9, Margin = new Thickness(0, 7, 0, 0), HorizontalAlignment = HorizontalAlignment.Center });
@@ -29,6 +30,7 @@ internal sealed class RecordingPanel : Window
         SourceInitialized += (_, _) =>
         {
             var handle = new WindowInteropHelper(this).Handle;
+            SetWindowDisplayAffinity(handle, 0x11);
             Native.SetWindowLongPtr(handle, Native.GwlExStyle, Native.GetWindowLongPtr(handle, Native.GwlExStyle) | Native.WsExNoActivate | Native.WsExToolWindow);
             HwndSource.FromHwnd(handle)?.AddHook((nint h, int m, nint w, nint l, ref bool handled) =>
             {
@@ -44,21 +46,33 @@ internal sealed class RecordingPanel : Window
             if (HwndSource.FromHwnd(handle)?.CompositionTarget is { } target) target.BackgroundColor = Colors.Transparent;
         };
     }
+    [DllImport("user32.dll")] private static extern bool SetWindowDisplayAffinity(nint window, uint affinity);
     [StructLayout(LayoutKind.Sequential)] private struct Margins { public int Left, Right, Top, Bottom; }
     [DllImport("dwmapi.dll")] private static extern int DwmExtendFrameIntoClientArea(nint window, ref Margins margins);
     public void Recording(nint foreground, string shortcut)
     {
         title.Text = "Listening"; hint.Text = $"Tap {shortcut} to finish"; meter.Processing = false; meter.Level = 0;
         Show();
-        var area = System.Windows.Forms.Screen.FromHandle(foreground).WorkingArea;
-        var transform = PresentationSource.FromVisual(this)?.CompositionTarget?.TransformFromDevice ?? Matrix.Identity;
-        var origin = transform.Transform(new Point(area.Left, area.Top));
-        var edge = transform.Transform(new Point(area.Right, area.Bottom));
-        Left = origin.X + (edge.X - origin.X - Width) / 2; Top = origin.Y + 20;
-        Native.ShowWindow(new WindowInteropHelper(this).Handle, 4); // SW_SHOWNOACTIVATE.
+        Position(this, foreground);
         meter.Start();
     }
-    public void Processing(string text = "Transcribing") { title.Text = text; hint.Text = "Turning your voice into text"; meter.Processing = true; }
+    internal static void Position(Window panel, nint foreground)
+    {
+        var area = System.Windows.Forms.Screen.FromHandle(foreground).WorkingArea;
+        var transform = PresentationSource.FromVisual(panel)?.CompositionTarget?.TransformFromDevice ?? Matrix.Identity;
+        var origin = transform.Transform(new Point(area.Left, area.Top));
+        var edge = transform.Transform(new Point(area.Right, area.Bottom));
+        panel.Left = origin.X + (edge.X - origin.X - panel.Width) / 2; panel.Top = origin.Y + 20;
+        Native.ShowWindow(new WindowInteropHelper(panel).Handle, 4);
+    }
+    public void Processing(string text = "Transcribing", nint foreground = 0)
+    {
+        title.Text = text; hint.Text = text == "Transcribing" ? "Turning your voice into text" : "A moment…"; meter.Processing = true;
+        if (!IsVisible) Show();
+        if (foreground != 0) Position(this, foreground);
+        else Native.ShowWindow(new WindowInteropHelper(this).Handle, 4);
+        meter.Start();
+    }
     public void SetLevel(float level) => meter.Level = level;
     public void Dismiss() { meter.Stop(); Hide(); }
 }

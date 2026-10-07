@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Sona shared AI cleanup settings",
+  "title": "Sona shared AI and text settings",
   "type": "object",
   "properties": {
     "ai": {
@@ -28,7 +28,8 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 150,
-          "default": "economy"
+          "default": "economy",
+          "description": "Legacy saved explicit model IDs remain readable. Ordinary dictation, snippet setup and unprofiled rewrite always use the economy preset. Separate assistant settings control explicitly invoked Option operations."
         },
         "timeoutMs": {
           "type": "integer",
@@ -67,9 +68,200 @@
       "items": {
         "type": "string",
         "minLength": 1,
-        "maxLength": 100
+        "maxLength": 100,
+        "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+        "description": "At most 100 UTF-16 code units at runtime. Reject C0/C1 controls (U+0000..001F and U+007F..009F). Format characters such as ZWJ are allowed."
+      }
+    },
+    "snippets": {
+      "type": "array",
+      "default": [],
+      "maxItems": 128,
+      "description": "Literal local substitutions. Duplicate triggers are rejected under Unicode case-insensitive matching. All expansion strings together must fit 65536 UTF-8 bytes. No recursive substitution.",
+      "items": {
+        "$ref": "#/$defs/snippet"
+      }
+    },
+    "commandHotkey": {
+      "type": "string",
+      "maxLength": 100,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]*$",
+      "default": "right-option",
+      "description": "Platform validates shortcut syntax and conflicts. Empty disables the command shortcut. The bridge only validates the stored value type and bounds."
+    },
+    "autoAddToDictionary": {
+      "type": "boolean",
+      "default": false,
+      "description": "Native UI preference. The bridge never persists vocabulary or snippet candidates."
+    },
+    "claudePath": {
+      "description": "Legacy Mac setting. Used only when provider is auto/claude and ai.executable is absent; an eligible value must be an absolute executable path. Explicit new routes/paths win. No disk migration."
+    },
+    "assistant": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "enum": [
+            "inherit",
+            "auto",
+            "none",
+            "claude",
+            "codex",
+            "anthropic",
+            "openai",
+            "gemini-cli",
+            "gemini",
+            "kimi",
+            "grok",
+            "opencode",
+            "custom"
+          ],
+          "default": "inherit"
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150,
+          "default": "default"
+        },
+        "effort": {
+          "enum": [
+            "default",
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ],
+          "default": "default"
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 250,
+          "maximum": 180000,
+          "default": 120000
+        }
+      },
+      "description": "Persisted Option assistant and selected rewrite choices, separate from ordinary dictation economy. default resolves the economy model until the user explicitly chooses another catalog model. No tools or local history are enabled."
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "snippet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "trigger",
+        "expansion"
+      ],
+      "properties": {
+        "trigger": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "allOf": [
+            {
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]*$"
+            },
+            {
+              "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+            }
+          ],
+          "description": "Already trimmed, at most 120 Unicode code points. No controls or line breaks."
+        },
+        "expansion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192,
+          "pattern": "^[^\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u007f-\\u009f]*$",
+          "not": {
+            "pattern": "^\\s*$"
+          },
+          "description": "At most 8192 UTF-8 bytes, not whitespace-only. Tabs and newlines are allowed; other controls are not."
+        }
+      }
+    },
+    "assistantOptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "enum": [
+            "inherit",
+            "auto",
+            "none",
+            "claude",
+            "codex",
+            "anthropic",
+            "openai",
+            "gemini-cli",
+            "gemini",
+            "kimi",
+            "grok",
+            "opencode",
+            "custom"
+          ],
+          "default": "inherit"
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150,
+          "default": "default"
+        },
+        "effort": {
+          "enum": [
+            "default",
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ],
+          "default": "default"
+        }
       }
     }
   },
-  "additionalProperties": true
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "ai": {
+            "properties": {
+              "provider": {
+                "enum": [
+                  "auto",
+                  "claude"
+                ]
+              }
+            },
+            "not": {
+              "required": [
+                "executable"
+              ]
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "claudePath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+            "description": "Must be absolute on the current platform; checked at runtime."
+          }
+        }
+      }
+    }
+  ]
 }

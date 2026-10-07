@@ -9,7 +9,7 @@ public static class BoundedProcess
 {
     // No shell, no transcript in argv, bounded output and time, and no inherited CLI stdin.
     public static async Task<ProcessResult> RunAsync(string executable, IEnumerable<string> arguments,
-        string input, TimeSpan timeout, CancellationToken cancellation = default)
+        string input, TimeSpan timeout, CancellationToken cancellation = default, int maximumOutput = 131072)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         deadline.CancelAfter(timeout);
@@ -27,7 +27,7 @@ public static class BoundedProcess
         try
         {
             process.Start();
-            var output = ReadLimited(process.StandardOutput, 131072, deadline.Token);
+            var output = ReadLimited(process.StandardOutput, Math.Clamp(maximumOutput, 1, 8 * 1024 * 1024), deadline.Token);
             var error = ReadLimited(process.StandardError, 32768, deadline.Token);
             // Pipe failures (including an overproducing child) end the process immediately.
             _ = Task.WhenAny(output, error).ContinueWith(t =>

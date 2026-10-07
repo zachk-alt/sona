@@ -20,6 +20,8 @@
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
   </PropertyGroup>
   <ItemGroup>
+    <!-- Retired Assistant code is excluded from the dictation-only app. -->
+    <Compile Remove="AssistantActionExecutor.cs;AssistantCursor.cs;AssistantUserActivity.cs;AssistantPanel.cs;AssistantSettingsWindow.cs;WindowContext.cs;SessionActivity.cs" />
     <ProjectReference Include="../Sona.Core/Sona.Core.csproj" />
     <PackageReference Include="NAudio.Wasapi" Version="2.4.0" />
     <PackageReference Include="Whisper.net" Version="1.9.1" />
@@ -30,7 +32,8 @@
     <None Include="../../docs/licenses/*.txt" Link="licenses/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
     <Resource Include="../../assets/Sona.ico" Link="Assets/Sona.ico" />
     <Resource Include="../../../Resources/SonaAppIcon.png" Link="Assets/SonaAppIcon.png" />
-    <None Include="../../../bridge/*.mjs;../../../bridge/*.json;../../../bridge/README.md" Link="bridge/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <Resource Include="../../../Resources/MenuIconRecording.png" Link="Assets/MenuIconRecording.png" />
+    <None Include="../../../bridge/*.mjs;../../../bridge/*.json;../../../bridge/README.md" Exclude="../../../bridge/blender.mjs;../../../bridge/blender-scene.py" Link="bridge/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
     <None Include="../../../bridge/prompts/*.txt" Link="bridge/prompts/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
     <Content Include="$(PkgWhisper_net_Runtime)/build/win-x64/*.dll" Link="runtimes/win-x64/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
     <Content Include="$(PkgWhisper_net_Runtime_NoAvx)/build/win-x64/*.dll" Link="runtimes/noavx/win-x64/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />

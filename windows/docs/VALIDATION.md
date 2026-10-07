@@ -22,4 +22,8 @@ No physical microphone, hardware shortcut, elevated target app, or authenticated
 
 The CI workflow builds and uploads artifacts only. It does not publish a GitHub release. The release owner must review results and publish the ZIP, installer, and trusted checksums.
 
-The later Gemini CLI settings option is distinct from the Gemini API option. Its provider ID is `gemini-cli`; `gemini` remains the API route, and Auto remains Claude/Codex only. The installer and native smoke test require the bundled `gemini-cli.mjs`, `gemini-launch.mjs`, and `gemini-loader.mjs` helpers. The provider-none smoke test does not verify a real Gemini login or account-backed request; the dedicated steps in `MANUAL-TESTS.md` cover that integration.
+The earlier Gemini CLI integration remains packaged for source compatibility, but the current feature update blocks Gemini CLI and Custom under the fixed-preset/no-local-session-history policy. Earlier CI evidence does not verify the new selection or observation features.
+
+The current feature source cross-compiles on Mac, and its portable Core tests pass. New native owned-window checks are authored but have not been executed on this Mac. `scripts/assert-runtime-qa.ps1` requires an explicit complete interactive pass, including no-content-read assertions for outside typing and unwitnessed changes. Real Windows 11 layout, microphone and app checks remain required.
+
+The current source removes the second shortcut and Assistant runtime. The earlier build and CI evidence above does not verify this change. Follow the current `MANUAL-TESTS.md` and strict native gate; do not claim Windows hardware validation based on a Mac cross-build.

@@ -15,7 +15,10 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/Murmur "$APP/Contents/MacOS/Murmur"
 cp Resources/*.png "$APP/Contents/Resources/"
 mkdir -p "$APP/Contents/Resources/bridge/prompts" "$APP/Contents/Resources/runtime" "$APP/Contents/Resources/Sounds"
-cp bridge/*.mjs "$APP/Contents/Resources/bridge/"
+for BRIDGE_MODULE in bridge/*.mjs; do
+  [ "$BRIDGE_MODULE" = "bridge/blender.mjs" ] && continue
+  cp "$BRIDGE_MODULE" "$APP/Contents/Resources/bridge/"
+done
 cp bridge/prompts/*.txt "$APP/Contents/Resources/bridge/prompts/"
 cp "$SONA_NODE_ROOT/bin/node" "$APP/Contents/Resources/runtime/node"
 cp "$SONA_NODE_ROOT/LICENSE" "$APP/Contents/Resources/runtime/NODE-LICENSE.txt"

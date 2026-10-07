@@ -4,5 +4,16 @@
     "model": "economy",
     "timeoutMs": 15000
   },
-  "vocabulary": ["Sona"]
+  "vocabulary": [
+    "Sona"
+  ],
+  "commandHotkey": "right-option",
+  "autoAddToDictionary": false,
+  "snippets": [],
+  "assistant": {
+    "provider": "inherit",
+    "model": "default",
+    "effort": "default",
+    "timeoutMs": 120000
+  }
 }

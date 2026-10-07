@@ -1,3 +1,5 @@
+import CoreGraphics
+
 import Foundation
 func XCTAssertEqual<T: Equatable>(_ a:T,_ b:T) { if a != b { fatalError("Expected \(a) == \(b)") } }
 func XCTAssertNotEqual<T: Equatable>(_ a:T,_ b:T) { if a == b { fatalError("Expected distinct values") } }
@@ -71,6 +73,115 @@ final class HotKeyTests {
         XCTAssertEqual(config.ai.model,"economy")
         XCTAssertEqual(config.hotkey,"option+space")
     }
+    func testDefaultDictationRouter() {
+        let router = HotKeyRouter(binding:HotKeyBinding("right-command")!)
+        let command = CGEventFlags(rawValue:CGEventFlags.maskCommand.rawValue | 0x10)
+        func event(_ type:CGEventType,_ code:Int64,_ flags:CGEventFlags,_ time:Double) -> HotKeyRoute {
+            router.route(type:type,code:code,flags:flags,time:time)
+        }
+        XCTAssertEqual(event(.flagsChanged,54,command,0).events,[.begin])
+        XCTAssertEqual(event(.flagsChanged,54,[],0.1).events,[.latch])
+        XCTAssertTrue(event(.flagsChanged,54,command,1).events.isEmpty)
+        XCTAssertEqual(event(.flagsChanged,54,[],1.1).events,[.unlatch])
+        XCTAssertEqual(event(.flagsChanged,54,command,2).events,[.begin])
+        XCTAssertEqual(event(.flagsChanged,54,[],2.8).events,[.commit])
+        router.reset()
+        XCTAssertEqual(event(.flagsChanged,54,command,3).events,[.begin])
+        router.reset()
+        XCTAssertTrue(event(.flagsChanged,54,[],3.1).events.isEmpty)
+    }
+    func testRetiredSettingsCannotReactivateOption() throws {
+        for extra in [
+            #""commandHotkey":"right-option","assistant":{"provider":"codex","model":"chosen","effort":"high"}"#,
+            #""commandHotkey":"right-command","assistant":{"timeoutMs":-1}"#,
+            #""commandHotkey":42,"assistant":["invalid legacy value"]"#
+        ] {
+            let json = #"{"hotkey":"right-command","sound":"sona-blend","ai":{"provider":"claude","model":"economy"},"vocabulary":["Sona"],"# + extra + "}"
+            let config = try JSONDecoder().decode(Config.self,from:Data(json.utf8))
+            XCTAssertNil(config.validationError())
+            XCTAssertEqual(config.hotkey,"right-command")
+            XCTAssertEqual(config.sound,"sona-blend")
+            XCTAssertEqual(config.ai.provider,"claude")
+            XCTAssertEqual(config.ai.model,"economy")
+            XCTAssertEqual(config.vocabulary,["Sona"])
+            let router = HotKeyRouter(binding:HotKeyBinding(config.hotkey)!)
+            for side:Int64 in [58,61] {
+                let option = CGEventFlags(rawValue:CGEventFlags.maskAlternate.rawValue | (side == 58 ? 0x20 : 0x40))
+                for duration in [0.1,1.0] {
+                    let down = router.route(type:.flagsChanged,code:side,flags:option,time:0)
+                    let up = router.route(type:.flagsChanged,code:side,flags:[],time:duration)
+                    XCTAssertFalse(down.consumed); XCTAssertFalse(up.consumed)
+                    XCTAssertTrue(down.events.isEmpty); XCTAssertTrue(up.events.isEmpty)
+                }
+            }
+        }
+    }
+    func testOptionCharactersAndOrdinaryChordsPassThrough() {
+        let router = HotKeyRouter(binding:HotKeyBinding("right-command")!)
+        for side:Int64 in [58,61] {
+            let option = CGEventFlags(rawValue:CGEventFlags.maskAlternate.rawValue | (side == 58 ? 0x20 : 0x40))
+            for (type,code,flags,time):(CGEventType,Int64,CGEventFlags,Double) in [
+                (.flagsChanged,side,option,0),(.keyDown,0,option,0.1),
+                (.keyUp,0,option,0.2),(.flagsChanged,side,[],0.3)
+            ] {
+                let result = router.route(type:type,code:code,flags:flags,time:time)
+                XCTAssertFalse(result.consumed); XCTAssertTrue(result.events.isEmpty)
+            }
+        }
+        let command = CGEventFlags(rawValue:CGEventFlags.maskCommand.rawValue | 0x10)
+        XCTAssertEqual(router.route(type:.flagsChanged,code:54,flags:command,time:1).events,[.begin])
+        let copy = router.route(type:.keyDown,code:8,flags:command,time:1.05)
+        XCTAssertFalse(copy.consumed); XCTAssertEqual(copy.events,[.discard])
+        XCTAssertTrue(router.route(type:.keyUp,code:8,flags:command,time:1.1).events.isEmpty)
+        XCTAssertTrue(router.route(type:.flagsChanged,code:54,flags:[],time:1.2).events.isEmpty)
+        // A normal chord during latched dictation must not stop the recording.
+        _ = router.route(type:.flagsChanged,code:54,flags:command,time:2)
+        XCTAssertEqual(router.route(type:.flagsChanged,code:54,flags:[],time:2.1).events,[.latch])
+        _ = router.route(type:.flagsChanged,code:54,flags:command,time:3)
+        XCTAssertTrue(router.route(type:.keyDown,code:8,flags:command,time:3.05).events.isEmpty)
+        _ = router.route(type:.keyUp,code:8,flags:command,time:3.1)
+        XCTAssertTrue(router.route(type:.flagsChanged,code:54,flags:[],time:3.2).events.isEmpty)
+        _ = router.route(type:.flagsChanged,code:54,flags:command,time:4)
+        XCTAssertEqual(router.route(type:.flagsChanged,code:54,flags:[],time:4.1).events,[.unlatch])
+    }
+    func testOnlyChosenOptionSideCanBeTheDictationKey() {
+        let left = HotKeyBinding("left-option")!, right = HotKeyBinding("right-option")!
+        XCTAssertEqual(left.keyCode,58); XCTAssertEqual(right.keyCode,61)
+        XCTAssertEqual(left.deviceFlag,0x20); XCTAssertEqual(right.deviceFlag,0x40)
+        for selected in [left,right] {
+            let router = HotKeyRouter(binding:selected)
+            let other = selected == left ? right : left
+            let otherFlags = CGEventFlags(rawValue:CGEventFlags.maskAlternate.rawValue | other.deviceFlag!)
+            XCTAssertTrue(router.route(type:.flagsChanged,code:other.keyCode,flags:otherFlags,time:0).events.isEmpty)
+            XCTAssertTrue(router.route(type:.flagsChanged,code:other.keyCode,flags:[],time:0.1).events.isEmpty)
+            let ownFlags = CGEventFlags(rawValue:CGEventFlags.maskAlternate.rawValue | selected.deviceFlag!)
+            XCTAssertEqual(router.route(type:.flagsChanged,code:selected.keyCode,flags:ownFlags,time:1).events,[.begin])
+            XCTAssertEqual(router.route(type:.flagsChanged,code:selected.keyCode,flags:[],time:1.8).events,[.commit])
+            router.reset()
+            _ = router.route(type:.flagsChanged,code:selected.keyCode,flags:ownFlags,time:2)
+            let both = CGEventFlags(rawValue:ownFlags.rawValue | other.deviceFlag!)
+            XCTAssertEqual(router.route(type:.flagsChanged,code:other.keyCode,flags:both,time:2.1).events,[.discard])
+            XCTAssertTrue(router.route(type:.flagsChanged,code:other.keyCode,flags:ownFlags,time:2.2).events.isEmpty)
+            XCTAssertTrue(router.route(type:.flagsChanged,code:selected.keyCode,flags:[],time:2.3).events.isEmpty)
+        }
+    }
+    func testChosenChordAndRepeatedKeys() {
+        let router = HotKeyRouter(binding:HotKeyBinding("option+space")!)
+        let repeatOnly = router.route(type:.keyDown,code:49,flags:.maskAlternate,repeatKey:true,time:0)
+        XCTAssertFalse(repeatOnly.consumed); XCTAssertTrue(repeatOnly.events.isEmpty)
+        XCTAssertFalse(router.route(type:.keyUp,code:49,flags:.maskAlternate,time:0.1).consumed)
+        let down = router.route(type:.keyDown,code:49,flags:.maskAlternate,time:1)
+        XCTAssertTrue(down.consumed); XCTAssertEqual(down.events,[.begin])
+        let repeatDown = router.route(type:.keyDown,code:49,flags:.maskAlternate,repeatKey:true,time:1.1)
+        XCTAssertTrue(repeatDown.consumed); XCTAssertTrue(repeatDown.events.isEmpty)
+        let up = router.route(type:.keyUp,code:49,flags:.maskAlternate,time:1.8)
+        XCTAssertTrue(up.consumed); XCTAssertEqual(up.events,[.commit])
+        router.reset()
+        let plainSpace = router.route(type:.keyDown,code:49,flags:[],time:2)
+        XCTAssertFalse(plainSpace.consumed); XCTAssertTrue(plainSpace.events.isEmpty)
+        XCTAssertFalse(router.route(type:.keyUp,code:49,flags:[],time:2.1).consumed)
+    }
+
 }
 
 @main struct RunHotKeyTests {
@@ -84,6 +195,11 @@ final class HotKeyTests {
         tests.testHotkeySelectionDistinguishesSideAndModifiers()
         try tests.testLegacyConfigKeepsPreferencesAndDoesNotForceSetup()
         try tests.testNewPartialAIConfigPreservesEconomyDefaults()
-        print("8 hotkey and configuration behavior checks passed.")
+        tests.testDefaultDictationRouter()
+        try tests.testRetiredSettingsCannotReactivateOption()
+        tests.testOptionCharactersAndOrdinaryChordsPassThrough()
+        tests.testOnlyChosenOptionSideCanBeTheDictationKey()
+        tests.testChosenChordAndRepeatedKeys()
+        print("13 dictation-only hotkey, passthrough and configuration behavior groups passed.")
     }
 }

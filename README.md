@@ -54,14 +54,14 @@ It downloads the matching release, checks its SHA-256, installs a private Node r
 | --- | --- |
 | Claude | Your installed, signed-in Claude Code CLI; Haiku economy default |
 | ChatGPT / Codex | Your installed, signed-in Codex CLI; Luna economy default |
-| Gemini CLI | Your installed, signed-in Gemini CLI, selected with `gemini-cli` |
 | Gemini API, Grok, Kimi, OpenAI, Anthropic, OpenCode | Their API, using your own API environment variable |
-| Custom | An OpenAI-compatible endpoint and explicit model ID, including a local server |
 | None | Plain, local dictation with no AI request |
 
-Automatic mode selects an installed Claude or Codex CLI. It never silently chooses a paid API. API accounts are separate from chat subscriptions. No app can turn one company's subscription into access to all companies' models. Sona does not extract credentials or install/login to AI clients on your behalf. Gemini CLI is a separate explicit choice, `gemini-cli`; the existing `gemini` choice continues to use the API. Grok has an official CLI, but this release uses its API while a separate CLI adapter is being verified.
+Automatic mode selects an installed Claude or Codex CLI. It never silently chooses a paid API. API accounts are separate from chat subscriptions. No app can turn one company's subscription into access to all companies' models. Sona does not extract credentials or install/login to AI clients on your behalf. Grok uses its API; no supported isolated Grok CLI adapter is included.
 
-The reviewed model catalog, environment variable names, request isolation and configuration schema live in [bridge/README.md](bridge/README.md). Economy is a fixed small or low-effort choice where available, not a live price optimizer. An unavailable model, timeout, invalid response or missing login falls back to the original local transcript. There is no automatic upgrade to a more expensive model.
+The `gemini-cli` setting is retained for old configurations, but Sona refuses to send text through it because the reviewed CLI cannot disable its local session history. The separate `gemini` API remains available only when you explicitly configure it. Custom endpoints without a reviewed economy mapping are also refused. Stored model overrides are ignored in favor of the reviewed economy choice. These settings keep ordinary local dictation working and do not silently switch your provider.
+
+The reviewed model catalog, environment variable names, request isolation and configuration schema live in [bridge/README.md](bridge/README.md). Dictation and saved-phrase setup use the reviewed economy choice, not a live price optimizer. An unavailable model, timeout, invalid response or missing login falls back to the original local transcript during dictation. There is no automatic upgrade to a more expensive model.
 
 ## Updates
 
@@ -74,9 +74,25 @@ Sona does not auto-update or require installing a new Sona version to keep using
 - Speak while the waveform is active. The orbit and loading wave run during processing. The panel remains through insertion and dismisses gently.
 - Keep your original text field focused until insertion. If it changes, recover the result from the app's copy action rather than pasting into an unintended field.
 - Select text before dictation to replace it. Sona does not submit or execute the resulting text.
-- Disable cleanup at any time for fully local dictation. AI cleanup sends the transcript, not microphone audio, to the selected provider.
+- Disable cleanup at any time for fully local dictation. Saved phrases still expand locally. AI cleanup sends text, not microphone audio, to the selected provider.
 
-The Mac panel uses native appearance-aware materials and edge refraction without taking key focus. Accessibility appearance settings are respected. Windows has its own nonactivating panel.
+The Mac recording and loading panel appears over regular desktops, other apps in full-screen Spaces, and Stage Manager groups. It uses native appearance-aware materials and edge refraction without taking key focus. Accessibility appearance settings are respected. Windows has its own nonactivating panel.
+
+If the Mac menu icon is missing or obscured, open Sona from Applications again to restore its visibility and open the existing menu, including Copy pending text and Quit. macOS can still obscure an icon when the menu bar is full. The recording panel uses a visible position on the active display if its menu anchor is unavailable or offscreen.
+
+Sona now has **one dictation shortcut**. The second shortcut, selected-text instruction mode, screen questions and Assistant model settings have been removed. Old second-shortcut settings are ignored. Option keeps its normal keyboard behavior unless you deliberately choose it as your sole dictation shortcut. To replace selected text, dictate the replacement words directly.
+
+## Words and saved phrases
+
+Open the words and saved phrases editor from Sona's Mac menu or Windows Settings. Add, edit or remove vocabulary and phrases without editing JSON. Changes stay in a draft until you save them.
+
+- **Words:** preferred names and spellings supplied to optional AI cleanup.
+- **Saved phrases:** a spoken trigger and its replacement text, such as “my scheduling link” and `https://example.com/book`. Matching ignores case, requires a whole phrase and gives the longest overlapping trigger priority. Expansion is literal and does not expand other triggers inside the replacement.
+- **Suggest saved phrases:** an explicit setup action using your configured AI. Paste the links, signature or other details you want to use, then review each suggestion. Sona cannot look through your past chats, personal files or connected services. Manual editing remains available when suggestions are empty or unsuccessful. This command is unavailable with provider None and never runs during dictation, on launch or on a timer.
+
+Phrase expansion happens locally before optional cleanup, with no additional AI request. With cleanup off or provider None, the expanded text is inserted directly. If an attempted cleanup fails, Sona returns the exact original recognition text, without partially applying phrase expansions.
+
+**Suggest corrected spellings** is optional and off by default. In supported fields, it watches only Sona's verified insertion for up to **15 seconds** and asks before adding a corrected word. It stops on a focus change, a new recording, disabling the feature, or uncertainty about which text belongs to the insertion. Both platforms deliberately limit this to verified insertions into otherwise empty plain-text fields. Other fields continue to support dictation without this observation. See [PRIVACY.md](PRIVACY.md) for the exact scope and platform limits.
 
 ## Settings and privacy
 
@@ -88,21 +104,26 @@ Mac settings: `~/.config/murmur/config.json`. Windows: `%LOCALAPPDATA%\Sona`, wi
   "setupComplete": true,
   "cleanupEnabled": true,
   "ai": { "provider": "codex", "model": "economy", "timeoutMs": 12000 },
-  "vocabulary": ["Sona"]
+  "vocabulary": ["Sona"],
+  "snippets": [{ "trigger": "my scheduling link", "expansion": "https://example.com/book" }],
+  "autoAddToDictionary": false
 }
 ```
 
 Optional API settings use `apiKeyEnv` for the name of an environment variable, never the credential itself. An app launched from Finder or Explorer may not inherit variables set only in a terminal. Launch it from the configured environment or configure your operating system's user environment, then restart it. Never commit your settings or keys.
 
+The example above is the Mac config. Windows stores vocabulary and snippets together in `ai.json`, with the dictation hotkey and the spelling-suggestion switch in its app settings. Older configurations load without a migration step: phrases start empty, correction observation stays off, and retired second-shortcut/Assistant preferences cannot enable another hotkey. Editors validate entries and replace the config file atomically.
+
 Mac's Sound menu includes the Sona blend and installed system/instrument sounds. The blend loads Bottle and Purr from that Mac at runtime. Windows ships original synthesized companion sounds. Apple's sound files are not redistributed. The supplied Sona app icon is included on both platforms.
 
-Sona keeps recordings and transcripts in memory rather than saving a history. Local status logs do not contain transcript text. AI providers have their own retention and account policies. Gemini CLI can also retain its own local session history; Sona does not copy or publish that history. Read [PRIVACY.md](PRIVACY.md) and [SECURITY.md](SECURITY.md).
+Sona keeps recordings, transcripts, selected text and unsaved setup suggestions in memory rather than saving a history. Only settings you confirm, including vocabulary and saved phrases, are written to the config. Local status logs do not contain that text. AI providers have their own retention and account policies. Read [PRIVACY.md](PRIVACY.md) and [SECURITY.md](SECURITY.md).
 
 ## Build and check
 
 ```sh
 swift build -c release
 bash scripts/test-hotkeys.sh
+bash scripts/test-assistant-panel-placement.sh
 node --test bridge/test/*.test.mjs
 ./bundle.sh --no-install
 ```
@@ -113,6 +134,7 @@ node --test bridge/test/*.test.mjs
 .build/release/Murmur --panel 6
 MURMUR_BACKDROP=1 .build/release/Murmur --panel 6
 .build/release/Murmur --panel 8 --processing
+.build/release/Murmur --recording-surface-selftest
 .build/release/Murmur --prepare-speech
 ```
 

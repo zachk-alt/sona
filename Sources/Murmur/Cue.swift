@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreAudio
 import Foundation
 
 /// A selectable start/stop sound.
@@ -26,13 +27,22 @@ struct SoundChoice {
 /// "techy" to the person who has to hear it forty times a day; a real
 /// recording and a menu to pick from ends that loop.
 ///
-/// Playback is a permanently-running output-only AVAudioEngine. Measured
+/// Playback uses an output-only AVAudioEngine kept warm between cues, with
+/// recovery after audio-device changes. Measured
 /// alternatives, and why they lose:
 ///   NSSound        first play 312-2208 ms, and warm plays still BLOCK the
 ///                  calling thread 10.9-22.9 ms EVERY time.
 ///   AVAudioPlayer  first play 49.6-256.6 ms even after prepareToPlay plus a
 ///                  silent warmup play.
-///   this           0.014-1.13 ms per trigger, and never goes cold.
+///   this           0.014-1.13 ms per trigger while the engine stays running.
+///
+/// Warm is not free: a running engine keeps the speaker hardware and
+/// coreaudiod busy around the clock (2026-10-01: coreaudiod at about 9% of a
+/// core, constant, with Sona the only audio client, on a Mac that never
+/// sleeps). So the engine pauses `warmSeconds` after the last cue. In the
+/// recorded history 65% of dictations follow the previous one within five
+/// minutes, and those stay instant; the first cue after a quiet stretch
+/// wakes the engine and logs what the wake cost.
 final class Cue {
 
     private static let ax = "/System/Library/PrivateFrameworks/AXMediaUtilities.framework/Versions/A/Resources/sounds/"
@@ -116,11 +126,28 @@ final class Cue {
     private var sampleRate: Double { format.sampleRate }
     private var startBuffer: AVAudioPCMBuffer?
     private var stopBuffer: AVAudioPCMBuffer?
-    private var ready = false
+    // Graph ownership and playback readiness are different: a device change
+    // can stop the engine without detaching any of its nodes.
+    private var graphAttached = false
+    private var connectedOutputFormat: AVAudioFormat?
+    private var outputNeedsReconnect = true
+    private var configurationObserver: NSObjectProtocol?
+    private var hasStarted = false
+    private var lastFailure: String?
+    /// How long the engine stays running after the last cue.
+    static let warmSeconds: TimeInterval = 300
+    private var idleWork: DispatchWorkItem?
+    /// Set when the warm window closed, so the next start is an expected
+    /// wake rather than a recovery.
+    private var idlePaused = false
+
+    deinit {
+        if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) }
+    }
 
     /// Explicit file overrides beat the named choice.
     func prepare(choice: String?, startFile: String? = nil, stopFile: String? = nil, reverbMix: Double = 0.4) {
-        if !ready {
+        if !graphAttached {
             engine.attach(node)
             engine.attach(eq)
             engine.attach(reverb)
@@ -129,23 +156,100 @@ final class Cue {
             // is already stereo, and feeds the output directly.
             engine.connect(node, to: eq, format: format)
             engine.connect(eq, to: engine.mainMixerNode, format: format)
-            engine.connect(engine.mainMixerNode, to: reverb, format: nil)
-            engine.connect(reverb, to: engine.outputNode, format: nil)
 
             let low = eq.bands[0]
             low.filterType = .lowShelf; low.frequency = 140; low.gain = 4; low.bypass = true
             let top = eq.bands[1]
             top.filterType = .lowPass; top.frequency = 9000; top.bandwidth = 0.9; top.bypass = true
             reverb.loadFactoryPreset(.mediumRoom)
-            reverb.wetDryMix = Float(max(0, min(1, reverbMix)) * 100)
-
-            engine.prepare()
-            if (try? engine.start()) != nil {
-                node.play()
-                ready = true
+            graphAttached = true
+            configurationObserver = NotificationCenter.default.addObserver(
+                forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
+            ) { [weak self] _ in
+                // The engine posts on an internal queue. Never rewire or tear
+                // it down there. A notification never replays an earlier cue.
+                DispatchQueue.main.async { [weak self] in self?.configurationChanged() }
             }
         }
+        reverb.wetDryMix = Float(max(0, min(1, reverbMix)) * 100)
         apply(choice: choice, startFile: startFile, stopFile: stopFile)
+        _ = ensurePlayback()
+        scheduleIdlePause()
+    }
+
+    private func outputFormat() -> AVAudioFormat? {
+        #if CUE_PLAYBACK_TESTS
+        if testingOutputUnavailable { return nil }
+        #endif
+        let hardware = engine.isInManualRenderingMode ? engine.manualRenderingFormat
+            : engine.outputNode.outputFormat(forBus: 0)
+        guard hardware.sampleRate.isFinite, hardware.sampleRate > 0, hardware.channelCount > 0 else { return nil }
+        return AVAudioFormat(standardFormatWithSampleRate: hardware.sampleRate, channels: hardware.channelCount)
+    }
+
+    private func configurationChanged() {
+        guard graphAttached else { return }
+        // A strike may already have recovered before this queued notification
+        // arrives. Do not stop its newly scheduled sound a second time.
+        if engine.isRunning, let current = outputFormat(), current == connectedOutputFormat { return }
+        // A device change is a recovery, not a wake, even mid-idle.
+        node.stop(); engine.stop(); outputNeedsReconnect = true; idlePaused = false
+    }
+
+    @discardableResult
+    private func ensurePlayback() -> Bool {
+        guard graphAttached else { return false }
+        let began = DispatchTime.now().uptimeNanoseconds
+        guard let output = outputFormat() else {
+            node.stop(); engine.stop(); outputNeedsReconnect = true; idlePaused = false
+            reportFailure("output_unavailable"); return false
+        }
+        if outputNeedsReconnect || output != connectedOutputFormat {
+            idlePaused = false
+            node.stop(); engine.stop()
+            engine.disconnectNodeOutput(engine.mainMixerNode)
+            engine.disconnectNodeOutput(reverb)
+            // Apple's reverb requires stereo even for a mono headset route.
+            // Keep its existing stereo graph and let the output convert to
+            // the device channel layout, using the current device sample rate.
+            let effectFormat = AVAudioFormat(standardFormatWithSampleRate: output.sampleRate, channels: 2)!
+            engine.connect(engine.mainMixerNode, to: reverb, format: effectFormat)
+            engine.connect(reverb, to: engine.outputNode, format: effectFormat)
+            connectedOutputFormat = output; outputNeedsReconnect = false
+        }
+        var woke = false
+        if !engine.isRunning {
+            // Stopped engines can retain scheduled buffers. Only the new
+            // start/stop request below may make sound after recovery.
+            node.stop(); engine.prepare()
+            do {
+                #if CUE_PLAYBACK_TESTS
+                if testingStartFailures > 0 { testingStartFailures -= 1; throw TestingFailure.start }
+                #endif
+                try engine.start()
+            } catch { reportFailure("start_failed"); return false }
+            if idlePaused && lastFailure == nil {
+                woke = true
+            } else if hasStarted || lastFailure != nil {
+                Log.write("cue: playback_recovered")
+            }
+            idlePaused = false
+            hasStarted = true
+        }
+        if !node.isPlaying { node.stop(); node.play() }
+        if woke {
+            // The whole main-thread cost, player restart included. The first
+            // sample reaches the speaker a little later than a warm cue too.
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - began) / 1_000_000
+            Log.write(String(format: "cue: woke after idle in %.1f ms (main thread)", ms))
+        }
+        lastFailure = nil
+        return true
+    }
+
+    private func reportFailure(_ reason: String) {
+        if lastFailure != reason { Log.write("cue: " + reason) }
+        lastFailure = reason
     }
 
     func setSound(_ id: String) {
@@ -284,9 +388,96 @@ final class Cue {
     func stop() { strike(stopBuffer) }
 
     private func strike(_ buffer: AVAudioPCMBuffer?) {
-        guard ready, let buffer else { return }
+        guard let buffer, ensurePlayback() else { return }
         node.scheduleBuffer(buffer, at: nil, options: .interrupts)
+        scheduleIdlePause()
     }
+
+    /// Every cue restarts the warm window; only the latest one can fire.
+    private func scheduleIdlePause() {
+        idleWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.pauseIfIdle() }
+        idleWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + idleDelay, execute: work)
+    }
+
+    private var idleDelay: TimeInterval {
+        #if CUE_PLAYBACK_TESTS
+        if let testingIdleDelay { return testingIdleDelay }
+        #endif
+        return Self.warmSeconds
+    }
+
+    /// Releases the audio hardware. pause() keeps the prepared graph, so a
+    /// wake is start() alone; the player is stopped first so nothing queued
+    /// can sound on the next wake except that cue.
+    private func pauseIfIdle() {
+        idleWork = nil
+        guard graphAttached, engine.isRunning else { return }
+        // Bluetooth, display and AirPlay outputs fall asleep when their stream
+        // stops and clip the start of the next sound; the always-running
+        // stream is what kept cues reliable there. Release only the built-in
+        // output, where the cost was measured, and look again next window in
+        // case the route moves back.
+        guard outputIsBuiltIn else { scheduleIdlePause(); return }
+        node.stop(); engine.pause()
+        idlePaused = true
+    }
+
+    /// Unknown counts as not built-in, which keeps today's always-warm behavior.
+    private var outputIsBuiltIn: Bool {
+        #if CUE_PLAYBACK_TESTS
+        if let testingOutputIsBuiltIn { return testingOutputIsBuiltIn }
+        #endif
+        if engine.isInManualRenderingMode { return true }
+        var transport: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyTransportType,
+                                                 mScope: kAudioObjectPropertyScopeGlobal,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        let status = AudioObjectGetPropertyData(engine.outputNode.auAudioUnit.deviceID,
+                                                &address, 0, nil, &size, &transport)
+        return status == noErr && transport == kAudioDeviceTransportTypeBuiltIn
+    }
+
+    #if CUE_PLAYBACK_TESTS
+    private enum TestingFailure: Error { case start }
+    var testingStartFailures = 0
+    var testingOutputUnavailable = false
+    var testingIdleDelay: TimeInterval?
+    var testingOutputIsBuiltIn: Bool?
+    static func testingOffline(sampleRate: Double = 44100) throws -> Cue {
+        let cue = Cue()
+        try cue.engine.enableManualRenderingMode(.offline,
+            format: AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2)!, maximumFrameCount: 512)
+        return cue
+    }
+    var testingEngineRunning: Bool { engine.isRunning }
+    var testingPlayerRunning: Bool { node.isPlaying }
+    var testingAttachedCount: Int { engine.attachedNodes.count }
+    var testingWetDryMix: Float { reverb.wetDryMix }
+    func testingStopEngine() { engine.stop() }
+    func testingPausePlayer() { node.pause() }
+    func testingPostConfigurationChange() {
+        NotificationCenter.default.post(name: .AVAudioEngineConfigurationChange, object: engine)
+    }
+    func testingSetOutputRate(_ sampleRate: Double, channels: AVAudioChannelCount = 2) throws {
+        node.stop(); engine.stop(); engine.disableManualRenderingMode()
+        try engine.enableManualRenderingMode(.offline,
+            format: AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: channels)!, maximumFrameCount: 512)
+    }
+    func testingRender(seconds: Double) throws -> [Float] {
+        let frames = Int(seconds * engine.manualRenderingFormat.sampleRate)
+        let buffer = AVAudioPCMBuffer(pcmFormat: engine.manualRenderingFormat, frameCapacity: 512)!
+        var samples: [Float] = []
+        while samples.count < frames {
+            let status = try engine.renderOffline(AVAudioFrameCount(min(512, frames-samples.count)), to: buffer)
+            guard status == .success, buffer.frameLength > 0, let data = buffer.floatChannelData?[0] else { throw TestingFailure.start }
+            samples.append(contentsOf: UnsafeBufferPointer(start: data, count: Int(buffer.frameLength)))
+        }
+        return samples
+    }
+    #endif
 
     /// Body. A single recorded sample is thin and hollow on its own, so the
     /// sample is layered with itself an octave down (0.6) and a fifth down

@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { cleanup, doctor } from '../cleanup.mjs';
+import { doctor } from '../cleanup.mjs';
+import { adapterCleanup } from './transport-fixture.mjs';
 import { GEMINI_MODEL, GEMINI_VERSION, checkSettingsLayers, geminiInput, parseGeminiOutput, parseSettings, restrictedSettings } from '../gemini-cli.mjs';
 
 const raw = 'um hello world';
@@ -103,7 +104,7 @@ if(kind==='silent'){setInterval(()=>{},1000)}else{
 }
 `;
 
-test('Gemini complete subprocess lifecycle uses cached-auth route and refuses every unsafe/error result', async (context) => {
+test('Retained Gemini adapter subprocess lifecycle uses cached-auth route and refuses every unsafe/error result', async (context) => {
   const folder = await mkdtemp(path.join(tmpdir(), 'sona-gemini-test-'));
   try {
     const cli = path.join(folder, 'node_modules', '@google', 'gemini-cli');
@@ -127,7 +128,7 @@ test('Gemini complete subprocess lifecycle uses cached-auth route and refuses ev
         await rm(marker, { force: true });
         const diagnostics = [], started = performance.now();
         const original = kind === 'echo' ? '/execute @private.txt user@example.invalid' : raw;
-        const result = await cleanup(original, cfg, { env: { ...env, SONA_GEMINI_CASE: kind }, diagnose: (value) => diagnostics.push(value) });
+        const result = await adapterCleanup(original, cfg, { env: { ...env, SONA_GEMINI_CASE: kind }, diagnose: (value) => diagnostics.push(value) });
         assert.equal(result, kind === 'success' ? 'Hello, world.' : original);
         if (['remote-hook', 'remote-mcp', 'extension', 'registry-tool', 'auth-change'].includes(kind)) {
           assert.equal(await readFile(marker, 'utf8').catch(() => null), null, 'Unsafe initialization must not run');
@@ -139,7 +140,7 @@ test('Gemini complete subprocess lifecycle uses cached-auth route and refuses ev
     await context.test('unknown version launches nothing and doctor reports incompatibility', async () => {
       await writeFile(path.join(cli, 'package.json'), JSON.stringify({ ...metadata, version: '0.59.0' }));
       const diagnostics=[];
-      assert.equal(await cleanup(raw, cfg, { env, diagnose:(v)=>diagnostics.push(v) }), raw);
+      assert.equal(await adapterCleanup(raw, cfg, { env, diagnose:(v)=>diagnostics.push(v) }), raw);
       assert.deepEqual(diagnostics,['gemini_version_unsupported']);
       const report=await doctor(cfg,env), row=report.providers.find((v)=>v.id==='gemini-cli');
       assert.equal(row.available,false);assert.equal(row.installed,true);assert.equal(row.authenticationTested,false);
@@ -147,7 +148,7 @@ test('Gemini complete subprocess lifecycle uses cached-auth route and refuses ev
     await context.test('managed settings are not overwritten', async () => {
       await writeFile(path.join(cli, 'package.json'), JSON.stringify(metadata));
       const content='{"hooksConfig":{"enabled":true}}';await writeFile(systemPath,content);
-      const diagnostics=[];assert.equal(await cleanup(raw,cfg,{env,diagnose:(v)=>diagnostics.push(v)}),raw);
+      const diagnostics=[];assert.equal(await adapterCleanup(raw,cfg,{env,diagnose:(v)=>diagnostics.push(v)}),raw);
       assert.deepEqual(diagnostics,['gemini_managed_settings_conflict']);
       assert.equal(await readFile(systemPath,'utf8'),content);
     });
@@ -156,7 +157,7 @@ test('Gemini complete subprocess lifecycle uses cached-auth route and refuses ev
       const alternate = path.join(folder, 'alternate'); await mkdir(path.join(alternate, '.gemini'), { recursive: true });
       await writeFile(path.join(alternate, '.gemini', 'settings.json'), '{"context":{"includeDirectories":["extra-context"]}}');
       const diagnostics=[];
-      assert.equal(await cleanup(raw,cfg,{env:{...env,GEMINI_CLI_HOME:alternate},diagnose:(v)=>diagnostics.push(v)}),raw);
+      assert.equal(await adapterCleanup(raw,cfg,{env:{...env,GEMINI_CLI_HOME:alternate},diagnose:(v)=>diagnostics.push(v)}),raw);
       assert.deepEqual(diagnostics,['gemini_context_conflict']);
     });
   } finally { await rm(folder, { recursive: true, force: true }); }

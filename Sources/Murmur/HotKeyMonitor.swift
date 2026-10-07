@@ -4,19 +4,17 @@ import Foundation
 
 /// Watches only the configured gesture. Keyboard content is never retained.
 final class HotKeyMonitor {
-    private let binding: HotKeyBinding
-    private var pressedOnTapThread = false
-    private lazy var gesture = HotKeyGesture(holdThreshold: NSEvent.doubleClickInterval, handler: handler)
-
+    private let router: HotKeyRouter
+    private let stateLock = NSLock()
+    private var generation: UInt64 = 0
+    private let handler: (HotKeyEvent) -> Bool
     private(set) var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var tapThread: Thread?
     private var tapRunLoop: CFRunLoop?
 
-    private let handler: (HotKeyEvent) -> Bool
-
     init(binding: HotKeyBinding = HotKeyBinding("right-command")!, handler: @escaping (HotKeyEvent) -> Bool) {
-        self.binding = binding
+        router = HotKeyRouter(binding: binding, threshold: NSEvent.doubleClickInterval)
         self.handler = handler
     }
 
@@ -29,10 +27,8 @@ final class HotKeyMonitor {
     func start() -> Bool {
         guard tap == nil else { return true }
 
-        var mask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
-        if !binding.isModifier {
-            mask |= CGEventMask(1 << CGEventType.keyDown.rawValue) | CGEventMask(1 << CGEventType.keyUp.rawValue)
-        }
+        let mask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
+            | CGEventMask(1 << CGEventType.keyDown.rawValue) | CGEventMask(1 << CGEventType.keyUp.rawValue)
         let context = Unmanaged.passUnretained(self).toOpaque()
 
         guard let tap = CGEvent.tapCreate(
@@ -48,7 +44,14 @@ final class HotKeyMonitor {
             eventsOfInterest: mask,
             callback: { _, type, event, refcon in
                 if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                    Log.write("tap: disabled by system, re-enabling")
+                    Log.write("tap: disabled by system, cancelling stale gestures")
+                    if let refcon {
+                        let monitor = Unmanaged<HotKeyMonitor>.fromOpaque(refcon).takeUnretainedValue()
+                        monitor.resetGesture()
+                        DispatchQueue.main.async { [weak monitor] in
+                            _ = monitor?.handler(.discard)
+                        }
+                    }
                     if let refcon,
                        let tap = Unmanaged<HotKeyMonitor>.fromOpaque(refcon).takeUnretainedValue().tap {
                         CGEvent.tapEnable(tap: tap, enable: true)
@@ -76,13 +79,16 @@ final class HotKeyMonitor {
         // for the system to disable the tap. All state still lives on main; the
         // callback only ever dispatches there.
         let ready = DispatchSemaphore(value: 0)
-        let thread = Thread { [weak self] in
+        let thread = Thread { [self] in
             let loop = CFRunLoopGetCurrent()
-            self?.tapRunLoop = loop
+            self.tapRunLoop = loop
             CFRunLoopAddSource(loop, source, .commonModes)
             CGEvent.tapEnable(tap: tap, enable: true)
             ready.signal()
-            CFRunLoopRun()
+            // The C event callback carries an unretained context pointer.
+            // Keep it alive until invalidation has drained this run loop,
+            // including a final system-disabled callback during teardown.
+            withExtendedLifetime(self) { CFRunLoopRun() }
         }
         thread.name = "murmur.hotkey"
         thread.qualityOfService = .userInteractive
@@ -105,57 +111,39 @@ final class HotKeyMonitor {
         runLoopSource = nil
         tapRunLoop = nil
         tapThread = nil
-        pressedOnTapThread = false
-        gesture.reset()
+        resetGesture()
     }
 
-    func resetGesture() { gesture.reset() }
+    func resetGesture() {
+        stateLock.lock(); generation &+= 1; router.reset(); stateLock.unlock()
+    }
 
-    // MARK: - Event handling
-
-    /// Returns true only to consume a configured non-modifier key, so it does
-    /// not type a stray character into the target field.
     private func handle(_ event: CGEvent, type: CGEventType) -> Bool {
-        let code = event.getIntegerValueField(.keyboardEventKeycode)
-        let now = CFAbsoluteTimeGetCurrent()
-        if binding.isModifier {
-            guard code == binding.keyCode else {
-                if pressedOnTapThread && !binding.matches(flags: event.flags) {
-                    DispatchQueue.main.async { [weak self] in self?.gesture.invalidate() }
+        stateLock.lock()
+        let epoch = generation
+        let result = router.route(type: type, code: event.getIntegerValueField(.keyboardEventKeycode),
+                                  flags: event.flags, repeatKey: event.getIntegerValueField(.keyboardEventAutorepeat) != 0,
+                                  time: ProcessInfo.processInfo.systemUptime)
+        enqueue(result, epoch: epoch)
+        stateLock.unlock()
+        return result.consumed
+    }
+
+    /// Enqueued while locked so physical presses and releases retain their
+    /// order even if the main thread is briefly busy.
+    private func enqueue(_ result: HotKeyRoute, epoch: UInt64) {
+        if !result.events.isEmpty {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                for action in result.events {
+                    self.stateLock.lock(); let current = self.generation == epoch; self.stateLock.unlock()
+                    guard current else { return }
+                    if !self.handler(action) {
+                        self.stateLock.lock(); self.router.reset(); self.stateLock.unlock()
+                        return
+                    }
                 }
-                return false
             }
-            let down = event.flags.rawValue & binding.deviceFlag! != 0
-            if down && binding.matches(flags: event.flags) {
-                guard !pressedOnTapThread else { return false }
-                pressedOnTapThread = true
-                DispatchQueue.main.async { [weak self] in self?.gesture.press(at: now) }
-            } else if !down && pressedOnTapThread {
-                pressedOnTapThread = false
-                // Timing only, not the identity or content of another key.
-                let lastKey = now - CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown)
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    self.gesture.release(at: now, otherKey: self.gesture.pressedAt.map { lastKey > $0 } ?? false)
-                }
-            }
-            return false
         }
-        if type == .keyDown && code == binding.keyCode {
-            if pressedOnTapThread { return true }
-            guard binding.matches(flags: event.flags), event.getIntegerValueField(.keyboardEventAutorepeat) == 0 else { return false }
-            pressedOnTapThread = true
-            DispatchQueue.main.async { [weak self] in self?.gesture.press(at: now) }
-            return true
-        }
-        if type == .keyUp && code == binding.keyCode && pressedOnTapThread {
-            pressedOnTapThread = false
-            DispatchQueue.main.async { [weak self] in self?.gesture.release(at: now) }
-            return true
-        }
-        if type == .keyDown && pressedOnTapThread {
-            DispatchQueue.main.async { [weak self] in self?.gesture.invalidate() }
-        }
-        return false
     }
 }

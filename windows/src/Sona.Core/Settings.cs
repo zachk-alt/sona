@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace Sona.Core;
 
@@ -16,6 +17,7 @@ public sealed record AppSettings
     public bool SetupComplete { get; init; }
     public Shortcut Shortcut { get; init; } = new();
     public bool CleanupEnabled { get; init; } = true;
+    public bool AutoAddToDictionary { get; init; }
     public string Language { get; init; } = "auto";
     public string? MicrophoneId { get; init; }
     public string? NodePath { get; init; }
@@ -36,20 +38,38 @@ public static class SettingsStore
     public static readonly JsonSerializerOptions JsonOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true };
     public static AppSettings Load(string path)
     {
-        try { return (JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(path), JsonOptions) ?? new()).Validate(); }
-        catch (Exception e) when (e is IOException or JsonException or UnauthorizedAccessException) { return new(); }
-    }
-    public static void Save(string path, AppSettings settings)
-    {
-        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
-        var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            File.WriteAllText(temporary, JsonSerializer.Serialize(settings.Validate(), JsonOptions));
-            File.Move(temporary, path, true);
+            var document = JsonNode.Parse(File.ReadAllText(path))?.AsObject() ?? new();
+            T Read<T>(string name, T fallback)
+            {
+                try { return document[name] == null ? fallback : document[name]!.Deserialize<T>(JsonOptions)!; }
+                catch (Exception e) when (e is JsonException or InvalidOperationException or NotSupportedException) { return fallback; }
+            }
+            // Legacy commandShortcut and assistant fields are unowned data. Never parse or activate them.
+            var defaults = new AppSettings();
+            return (defaults with
+            {
+                Version = Read("version", defaults.Version), SetupComplete = Read("setupComplete", false),
+                Shortcut = Read("shortcut", defaults.Shortcut),
+                AutoAddToDictionary = Read("autoAddToDictionary", false), CleanupEnabled = Read("cleanupEnabled", true),
+                Language = Read("language", "auto"), MicrophoneId = Read<string?>("microphoneId", null), NodePath = Read<string?>("nodePath", null),
+                StartAtLogin = Read("startAtLogin", false), MaximumRecordingSeconds = Read("maximumRecordingSeconds", 120)
+            }).Validate();
         }
-        finally { if (File.Exists(temporary)) File.Delete(temporary); }
+        catch (Exception e) when (e is IOException or JsonException or UnauthorizedAccessException or InvalidOperationException) { return new(); }
     }
+    public static JsonObject MergeDocument(string path, AppSettings settings)
+    {
+        JsonObject existing;
+        try { existing = File.Exists(path) ? JsonNode.Parse(File.ReadAllText(path))?.AsObject() ?? throw new InvalidDataException("Settings must be an object.") : new(); }
+        catch (Exception e) when (e is JsonException or InvalidOperationException) { throw new InvalidDataException("Existing settings are malformed. Correct them before saving.", e); }
+        var owned = JsonSerializer.SerializeToNode(settings.Validate(), JsonOptions)!.AsObject();
+        foreach (var pair in owned) existing[pair.Key] = pair.Value?.DeepClone();
+        return existing;
+    }
+    public static void Save(string path, AppSettings settings) => FeatureConfig.WriteAtomic(path, MergeDocument(path, settings));
+
 }
 
 // Only a boolean chord marker is retained, never the identity of another key.
@@ -71,6 +91,11 @@ public sealed class ModifierTap
         return tap;
     }
     public void Reset() { pressedAt = null; chordUsed = false; }
+}
+
+public static class ShortcutPolicy
+{
+    public static bool RightAltCommandAllowed(uint keyboardLayout) => keyboardLayout == 0x04090409;
 }
 
 public static class InsertionPolicy

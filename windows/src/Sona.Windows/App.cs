@@ -20,6 +20,7 @@ internal sealed class App : Application
     private AppSettings settings = new();
     private Mutex? instance;
     private Forms.NotifyIcon? tray;
+    private System.Drawing.Icon? idleIcon, activeIcon;
     private HotkeyService? hotkey;
     private RecordingPanel? panel;
     private SettingsWindow? preferences;
@@ -29,6 +30,10 @@ internal sealed class App : Application
     private readonly DispatcherTimer limit = new();
     private CancellationTokenSource? operation;
     private FocusTarget? target;
+    private UiaSession? selectionSession, learningSession;
+    private readonly CorrectionLease learningLease = new(() => Environment.TickCount64);
+    private CancellationTokenSource? learningCancellation;
+    private WordCorrection? correction;
     private bool ready, busy, recording, quitting;
     private string latest = "";
     private System.Media.SoundPlayer? startCue, stopCue;
@@ -36,6 +41,12 @@ internal sealed class App : Application
     [STAThread]
     public static void Main(string[] args)
     {
+        if (args.Length == 1 && args[0] is "--uia-session" or "--uia-session-test")
+        {
+            var worker = new Thread(() => UiaWorker.Run(args[0] == "--uia-session-test")); worker.SetApartmentState(ApartmentState.MTA); worker.Start(); worker.Join(); return;
+        }
+        // Old worker invocations are inert, even if another process still has their names.
+        if (args.Length == 1 && args[0] is "--assistant-context" or "--assistant-context-test" or "--assistant-action") return;
         var app = new App { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         if (args.Length >= 2 && args[0] == "--self-test")
         {
@@ -60,7 +71,8 @@ internal sealed class App : Application
         settings = SettingsStore.Load(ConfigPath);
         using var resource = GetResourceStream(new Uri("pack://application:,,,/Assets/Sona.ico"))!.Stream;
         using var icon = new System.Drawing.Icon(resource);
-        tray = new Forms.NotifyIcon { Icon = (System.Drawing.Icon)icon.Clone(), Text = "Sona", Visible = true };
+        idleIcon = (System.Drawing.Icon)icon.Clone(); activeIcon = TrayIcons.Active();
+        tray = new Forms.NotifyIcon { Icon = idleIcon, Text = "Sona", Visible = true };
         var menu = new Forms.ContextMenuStrip();
         menu.Items.Add("Settings…", null, (_, _) => Dispatcher.Invoke(OpenSettings));
         menu.Items.Add("Copy last dictation", null, (_, _) => Dispatcher.Invoke(() =>
@@ -68,12 +80,13 @@ internal sealed class App : Application
             if (latest.Length == 0) { Notify("There is no dictation to copy yet."); return; }
             try { Clipboard.SetText(latest); Notify("Last dictation copied."); } catch { Notify("The clipboard is busy. Try again."); }
         }));
+        menu.Items.Add("Review dictionary suggestion…", null, (_, _) => Dispatcher.Invoke(ReviewCorrection));
         menu.Items.Add("Review last dictation…", null, (_, _) => Dispatcher.Invoke(ReviewLatest));
         menu.Items.Add("Cancel recording or processing", null, (_, _) => Dispatcher.InvokeAsync(CancelAsync));
         menu.Items.Add(new Forms.ToolStripSeparator());
         menu.Items.Add("Quit Sona", null, (_, _) => Dispatcher.InvokeAsync(QuitAsync));
         tray.ContextMenuStrip = menu; tray.DoubleClick += (_, _) => Dispatcher.Invoke(OpenSettings);
-        tray.BalloonTipClicked += (_, _) => Dispatcher.Invoke(ReviewLatest);
+        tray.BalloonTipClicked += (_, _) => Dispatcher.Invoke(() => { if (correction != null) ReviewCorrection(); else ReviewLatest(); });
         hotkey = new HotkeyService(); hotkey.Triggered += async () => await ToggleAsync();
         panel = new RecordingPanel();
         recorder.Level += v => Dispatcher.BeginInvoke(() => panel?.SetLevel(v));
@@ -104,20 +117,22 @@ internal sealed class App : Application
     {
         if (busy) { Notify("Finish or cancel this dictation before opening settings."); return; }
         if (preferences != null) { preferences.Activate(); return; }
+        StopLearning();
         hotkey?.Disable();
-        preferences = new SettingsWindow(settings, AiPath, ApplySettingsAsync, () => { preferences = null; ResumeShortcut(); });
+        preferences = new SettingsWindow(settings, AiPath, ApplySettingsAsync, AssistAsync, () => { preferences = null; ResumeShortcut(); });
         preferences.Show();
     }
-    private async Task ApplySettingsAsync(AppSettings next, string provider, string model, IProgress<double> progress, CancellationToken cancellation)
+    private async Task ApplySettingsAsync(AppSettings next, string provider, string model, string[] vocabulary, Snippet[] snippets, IProgress<double> progress, CancellationToken cancellation)
     {
         // Verify availability while the settings window owns focus, then disable until setup finishes.
         hotkey!.Configure(next.Shortcut); hotkey.Disable();
+        StopLearning();
         await new VerifiedDownloader(http).DownloadAsync(ModelPath, VerifiedDownloader.BaseModel, progress, cancellation);
         JsonObject document;
-        try { document = JsonNode.Parse(File.ReadAllText(AiPath))?.AsObject() ?? new(); }
+        try { document = JsonNode.Parse(File.ReadAllText(AiPath)) as JsonObject ?? throw new InvalidDataException("AI configuration must be a JSON object."); }
         catch (FileNotFoundException) { document = new(); }
         catch (JsonException) { throw new InvalidDataException("AI configuration is invalid JSON. Open it and correct it before saving."); }
-        var ai = document["ai"] as JsonObject ?? new JsonObject();
+        var ai = document["ai"] == null ? new JsonObject() : document["ai"] as JsonObject ?? throw new InvalidDataException("The ai field must be a JSON object.");
         string? previousProvider = ai["provider"]?.GetValue<string>();
         if (previousProvider != provider)
         {
@@ -127,31 +142,49 @@ internal sealed class App : Application
             ai.Remove("executable"); ai.Remove("args");
         }
         ai["provider"] = provider; ai["model"] = string.IsNullOrEmpty(model) ? "economy" : model;
-        ai["timeoutMs"] ??= 15000; document["ai"] = ai; document["vocabulary"] ??= new JsonArray();
-        string temporary = AiPath + ".tmp";
-        File.WriteAllText(temporary, document.ToJsonString(SettingsStore.JsonOptions)); File.Move(temporary, AiPath, true);
+        ai["timeoutMs"] ??= 15000; document["ai"] = ai; document["vocabulary"] = JsonSerializer.SerializeToNode(FeatureConfig.Vocabulary(vocabulary));
+        document["snippets"] = JsonSerializer.SerializeToNode(FeatureConfig.Snippets(snippets), SettingsStore.JsonOptions);
+        var appDocument = SettingsStore.MergeDocument(ConfigPath, next);
         using var key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run");
-        if (next.StartAtLogin) key.SetValue("Sona", "\"" + Environment.ProcessPath + "\""); else key.DeleteValue("Sona", false);
-        SettingsStore.Save(ConfigPath, next); settings = next; ready = true;
+        object? oldStartup = key.GetValue("Sona");
+        bool registryChanged = false;
+        try
+        {
+            if (next.StartAtLogin) key.SetValue("Sona", "\"" + Environment.ProcessPath + "\""); else key.DeleteValue("Sona", false);
+            registryChanged = true;
+            FeatureConfig.CommitDocuments((AiPath, document), (ConfigPath, appDocument));
+        }
+        catch
+        {
+            if (registryChanged)
+            {
+                try { if (oldStartup == null) key.DeleteValue("Sona", false); else key.SetValue("Sona", oldStartup); }
+                catch { throw new InvalidDataException("Saving settings failed and the startup preference could not be restored. Review Windows startup settings."); }
+            }
+            throw;
+        }
+        settings = next; ready = true;
     }
     private async Task ToggleAsync()
     {
         if (recording) { await FinishAsync(); return; }
         if (busy) return;
         if (!ready) { OpenSettings(); return; }
+        StopLearning(); correction = null;
         busy = true;
         try
         {
-            target = await TextInsertion.CaptureAsync();
-            if (target == null) { Notify("Place the cursor in an editable, non-password text field, then tap your shortcut."); busy = false; return; }
             operation = new CancellationTokenSource();
-            recorder.Start(settings.MicrophoneId);
-            recording = true; panel!.Recording(target.Window, HotkeyService.Label(settings.Shortcut));
+            target = await TextInsertion.CaptureAsync();
+            if (operation.IsCancellationRequested) { Reset(); return; }
+            if (target == null) { Reset(); Notify("Place the cursor in an editable, non-password text field, then tap your shortcut."); return; }
+            recorder.Start(settings.MicrophoneId); recording = true; if (tray != null) tray.Icon = activeIcon;
+            panel!.Recording(target.Window, HotkeyService.Label(settings.Shortcut));
             try { startCue?.Play(); } catch { }
             limit.Interval = TimeSpan.FromSeconds(settings.MaximumRecordingSeconds); limit.Start();
             tray!.Text = "Sona: recording";
         }
-        catch { Reset(); Notify("Sona could not open the microphone. Check Windows microphone privacy settings and your selected device."); }
+        catch { Reset(); Notify("Sona could not start this recording. Check the microphone and saved configuration. No text was changed."); }
     }
     private async Task FinishAsync()
     {
@@ -163,25 +196,22 @@ internal sealed class App : Application
             try { stopCue?.Play(); } catch { }
             bool audible = recorder.HasSpeech; recorder.Dispose();
             if (!audible || audio.Length < 4000) { Notify("No speech was detected. Try speaking a little closer to the microphone."); return; }
-            operation!.CancelAfter(TimeSpan.FromMinutes(2));
+            operation!.CancelAfter(TimeSpan.FromSeconds(120));
             var text = await transcriber.TranscribeAsync(audio, ModelPath, settings.Language, operation.Token);
             if (string.IsNullOrWhiteSpace(text)) { Notify("No speech was detected."); return; }
-            if (settings.CleanupEnabled)
-            {
-                panel.Processing("Polishing");
-                var bridge = Path.Combine(AppContext.BaseDirectory, "bridge", "sona-cleanup.mjs");
-                if (File.Exists(bridge))
-                {
-                    string bundledNode = Path.Combine(AppContext.BaseDirectory, "runtime", "node", "node.exe");
-                    string node = settings.NodePath ?? (File.Exists(bundledNode) ? bundledNode : "node.exe");
-                    var result = await BoundedProcess.RunAsync(node, [bridge, "--config", AiPath], text, TimeSpan.FromSeconds(35), operation.Token);
-                    text = result.Output; // The bridge and caller both preserve original text on failure.
-                }
-            }
-            operation.Token.ThrowIfCancellationRequested();
-            latest = text;
+            // Snippets run inside the bridge before optional cleanup, including when cleanup is off.
+            string raw = text;
+            text = BridgeProtocol.DictationText(await RequestAsync(BridgeProtocol.Dictate(raw, settings.CleanupEnabled), operation.Token), raw);
+            operation.Token.ThrowIfCancellationRequested(); latest = text;
+            if (target != null) selectionSession = await UiaSession.PrepareCorrectionAsync(settings.AutoAddToDictionary, target);
             bool pasted = target != null && await TextInsertion.PasteAsync(target, text);
             if (!pasted) Notify("Dictation is ready. Focus changed or this field blocked safe pasting. Use Copy last dictation in the Sona tray menu.");
+            else if (settings.AutoAddToDictionary && selectionSession != null && await selectionSession.ArmAsync(text))
+            {
+                learningSession = selectionSession; selectionSession = null;
+                learningLease.Start(true); learningCancellation = new();
+                _ = ObserveCorrectionsAsync(learningSession, target!, learningCancellation.Token);
+            }
         }
         catch (OperationCanceledException) { if (!quitting) Notify("Dictation cancelled."); }
         catch (Exception e)
@@ -195,6 +225,7 @@ internal sealed class App : Application
     }
     private async Task CancelAsync()
     {
+        StopLearning();
         operation?.Cancel();
         if (recording)
         {
@@ -205,8 +236,9 @@ internal sealed class App : Application
     }
     private void Reset()
     {
+        selectionSession?.Dispose(); selectionSession = null;
         limit.Stop(); recorder.Dispose(); panel?.Dismiss(); recording = false; busy = false; target = null;
-        operation?.Dispose(); operation = null; if (tray != null) tray.Text = "Sona";
+        operation?.Dispose(); operation = null; if (tray != null) { tray.Text = "Sona"; tray.Icon = idleIcon; }
     }
     private void Notify(string message)
     {
@@ -219,12 +251,58 @@ internal sealed class App : Application
         var text = new TextBox { Text = latest, IsReadOnly = true, TextWrapping = TextWrapping.Wrap, AcceptsReturn = true, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Margin = new Thickness(20), FontSize = 18 };
         new Window { Title = "Last dictation · Sona", Width = 600, Height = 360, Content = text, WindowStartupLocation = WindowStartupLocation.CenterScreen }.Show();
     }
+    private async Task<ProcessResult> RequestAsync(string request, CancellationToken cancellation, string? configOverride = null)
+    {
+        string bridge = Path.Combine(AppContext.BaseDirectory, "bridge", "sona-cleanup.mjs");
+        string bundledNode = Path.Combine(AppContext.BaseDirectory, "runtime", "node", "node.exe");
+        string node = settings.NodePath ?? (File.Exists(bundledNode) ? bundledNode : "node.exe");
+        if (!File.Exists(bridge)) return new(false, "", "bridge_missing");
+        return await BoundedProcess.RunAsync(node, [bridge, "--request", "--config", configOverride ?? AiPath], request, TimeSpan.FromSeconds(35), cancellation);
+    }
+    private async Task<BridgeReply> AssistAsync(string context, CancellationToken cancellation)
+        => BridgeProtocol.Parse(await RequestAsync(BridgeProtocol.Assist(context), cancellation), "snippet_assist", context: context);
+    private void StopLearning()
+    {
+        learningLease.Stop(); learningCancellation?.Cancel(); learningSession?.Dispose(); learningSession = null;
+        learningCancellation?.Dispose(); learningCancellation = null;
+    }
+    private async Task ObserveCorrectionsAsync(UiaSession session, FocusTarget originalTarget, CancellationToken cancellation)
+    {
+        try
+        {
+            while (settings.AutoAddToDictionary && learningLease.Active && !cancellation.IsCancellationRequested)
+            {
+                await Task.Delay(100, cancellation);
+                if (Native.GetForegroundWindow() != originalTarget.Window || Native.FocusAt(originalTarget.Window) != (originalTarget.Process, originalTarget.Focus)) break;
+                var result = await session.ObserveAsync();
+                if (cancellation.IsCancellationRequested || !learningLease.Active || !settings.AutoAddToDictionary) break;
+                if (result.Candidate != null) { correction = result.Candidate; Notify("A possible word correction is ready. Review it before adding it to your dictionary."); break; }
+                if (!result.Active) break;
+            }
+        }
+        catch (OperationCanceledException) { }
+        finally { if (ReferenceEquals(learningSession, session)) StopLearning(); else session.Dispose(); }
+    }
+    private void ReviewCorrection()
+    {
+        if (correction == null) { Notify("There is no dictionary suggestion to review."); return; }
+        StopLearning(); var candidate = correction; correction = null;
+        if (MessageBox.Show($"Add “{candidate.Replacement}” to your dictionary?\n\nObserved correction: {candidate.Original} → {candidate.Replacement}\nOnly this word will be saved.", "Review dictionary suggestion", MessageBoxButton.YesNo) != MessageBoxResult.Yes) return;
+        try
+        {
+            var document = JsonNode.Parse(File.ReadAllText(AiPath))?.AsObject() ?? throw new InvalidDataException();
+            var words = document["vocabulary"]?.AsArray().Select(v => v!.GetValue<string>()) ?? Enumerable.Empty<string>();
+            document["vocabulary"] = JsonSerializer.SerializeToNode(FeatureConfig.Vocabulary(words.Append(candidate.Replacement)));
+            FeatureConfig.WriteAtomic(AiPath, document); Notify("Word added. Manage your dictionary in Settings.");
+        }
+        catch { Notify("The dictionary could not be saved. Open Settings to review it."); }
+    }
     private async Task QuitAsync()
     {
         quitting = true; hotkey?.Disable(); await CancelAsync();
         // Native inference receives cancellation. Do not dispose its factory while a call is active.
         if (!busy) transcriber.Dispose();
-        panel?.Close(); tray?.Dispose(); startCue?.Dispose(); stopCue?.Dispose(); hotkey?.Dispose(); http.Dispose(); instance?.Dispose();
+        panel?.Close(); tray?.Dispose(); idleIcon?.Dispose(); activeIcon?.Dispose(); startCue?.Dispose(); stopCue?.Dispose(); hotkey?.Dispose(); http.Dispose(); instance?.Dispose();
         Shutdown();
     }
 }

@@ -8,6 +8,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { apiRequest, cleanup, cliArguments, doctor, parseAPIOutput, parseConfig, PROVIDERS } from '../cleanup.mjs';
 
+import { adapterCleanup } from './transport-fixture.mjs';
+
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const fixture = path.join(ROOT, 'fake-cli.mjs');
 const raw = 'um hello world';
@@ -129,7 +131,7 @@ test('actual local HTTP contracts: auth, output, errors, timeouts and redirect r
   const endpoint = `http://127.0.0.1:${server.address().port}/v1/chat/completions`;
   const cfg = { ai: { provider: 'custom', model: 'test-model', endpoint, apiKeyEnv: 'SONA_FAKE_KEY', timeoutMs: 300 } };
   try {
-    assert.equal(await cleanup(raw, cfg, { env: { SONA_FAKE_KEY: 'fixture-only-key' } }), 'Hello, world.');
+    assert.equal(await adapterCleanup(raw, cfg, { env: { SONA_FAKE_KEY: 'fixture-only-key' } }), 'Hello, world.');
     assert.equal(received[0].authorization, 'Bearer fixture-only-key');
     assert.equal(received[0].body.tool_choice, 'none');
     assert.equal(JSON.parse(received[0].body.messages[1].content).transcript, raw);
@@ -138,13 +140,16 @@ test('actual local HTTP contracts: auth, output, errors, timeouts and redirect r
       await context.test(kind, async () => {
         let diagnostic;
         const start = performance.now();
-        assert.equal(await cleanup(raw, cfg, { env: { SONA_FAKE_KEY: 'fixture-only-key' }, diagnose: (value) => { diagnostic = value; } }), raw);
+        assert.equal(await adapterCleanup(raw, cfg, { env: { SONA_FAKE_KEY: 'fixture-only-key' }, diagnose: (value) => { diagnostic = value; } }), raw);
         assert(performance.now() - start < 1500);
         assert(!diagnostic.includes('secret') && !diagnostic.includes('fixture-only-key'));
       });
     }
+    const beforePolicy = received.length;
+    assert.equal(await cleanup(raw, cfg, { env: { SONA_FAKE_KEY: 'fixture-only-key' } }), raw);
+    assert.equal(received.length, beforePolicy, 'Application custom policy must block before fetch');
     const count = received.length;
-    assert.equal(await cleanup(raw, cfg, { env: {} }), raw);
+    assert.equal(await adapterCleanup(raw, cfg, { env: {} }), raw);
     assert.equal(received.length, count, 'Missing credentials must not send data');
   } finally { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); }
 });

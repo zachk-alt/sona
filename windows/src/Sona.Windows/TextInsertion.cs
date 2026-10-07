@@ -55,7 +55,7 @@ internal static class TextInsertion
         if (Native.GetForegroundWindow() != window || Native.FocusAt(window) != info) return (null, "focus_changed");
         return (new(window, info.Process, info.Focus, metadata.RuntimeId), "ready");
     }
-    public static async Task<bool> PasteAsync(FocusTarget target, string text)
+    public static async Task<bool> PasteAsync(FocusTarget target, string text, Func<Task<bool>>? validate = null, Func<bool>? activity = null, OneShotCommit? commit = null)
     {
         // Never synthesize Ctrl+V while a physical modifier remains down.
         for (int i = 0; Native.AnyModifierHeld() && i < 50; i++) await Task.Delay(20);
@@ -66,10 +66,10 @@ internal static class TextInsertion
         {
             var window = Native.GetForegroundWindow();
             var current = Native.FocusAt(window);
-            return InsertionPolicy.MayPaste(target.Window, target.Process, target.Focus,
+            return (activity?.Invoke() ?? true) && InsertionPolicy.MayPaste(target.Window, target.Process, target.Focus,
                 window, current.Process, current.Focus, metadata.IsPassword, metadata.RuntimeId.SequenceEqual(target.RuntimeId));
         }
-        if (!Matches()) return false;
+        if (!Matches() || validate != null && !await validate()) return false;
         IDataObject? previous = null;
         uint ours = 0;
         bool changed = false;
@@ -90,7 +90,7 @@ internal static class TextInsertion
                 }
                 previous = snapshot;
             }
-            if (!Matches() || Native.AnyModifierHeld()) return false;
+            if (!Matches() || Native.AnyModifierHeld() || validate != null && !await validate()) return false;
             var payload = new DataObject();
             payload.SetText(text, TextDataFormat.UnicodeText);
             // Prevent this transient payload from roaming or being included in clipboard history.
@@ -99,7 +99,8 @@ internal static class TextInsertion
             Clipboard.SetDataObject(payload, true);
             changed = true;
             ours = Native.GetClipboardSequenceNumber();
-            if (!Matches() || Native.AnyModifierHeld()) return false;
+            if (!Matches() || Native.AnyModifierHeld() || validate != null && !await validate()) return false;
+            if (!Matches() || !(commit ?? new OneShotCommit()).TryBegin(true)) return false;
             if (Native.Paste() != 4) return false; // UIPI blocks input to higher-integrity apps.
             await Task.Delay(450); // Allow the focused app to consume a normal paste message.
             return true;
