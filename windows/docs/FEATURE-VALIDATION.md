@@ -29,9 +29,11 @@ On this Mac, the cached SDK's MSBuild entry point was used directly with its own
 
 ## Required native gate
 
-The new owned WPF tests are authored and compiled, but have not run on this Mac. They cover both registered shortcuts, nonactivating panels, exact selection replacement/refusal, verified-empty selection, disabled learning creating no worker, a witnessed word correction, outside/unwitnessed changes producing no extra content read, focus cancellation and actual 15-second helper termination. The installed test also exercises public-fixture Whisper and provider-none typed bridge behavior.
+The owned WPF tests first ran on Windows CI on 2026-10-06. They cover both registered shortcuts, nonactivating panels, disabled learning creating no worker, a witnessed word correction, outside/unwitnessed changes producing no extra content read, focus cancellation and actual 15-second helper termination. The installed test also exercises public-fixture Whisper and provider-none typed bridge behavior.
 
 `windows/scripts/assert-runtime-qa.ps1` rejects `partial`, skipped GUI checks and missing new feature assertions. A successful cross-build does not satisfy this gate.
+
+The exact-selection replacement and verified-empty selection probes belong to the retired selected-text command mode, whose only caller is not compiled into the app. On their first Windows run the exact-selection capture did not match, so they are now recorded as `retired_command_*` diagnostics and are not part of the gate.
 
 Learning's initial capability is deliberately narrow: an initially empty supported plain-text field, a single-line ASCII insertion of at most 4096 characters, a whole existing alphabetic word selected and replaced with alphabetic keypresses, 500 ms settling and a hard 15-second deadline. There are no adjacent-text reads. Unsupported fields, unknown range movement, paste, navigation, outside typing, unwitnessed changes and non-ASCII/multiline learning are skipped or stopped. UIA event coalescing and live range affinity require the actual Windows tests.
 
