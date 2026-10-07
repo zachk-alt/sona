@@ -19,6 +19,19 @@ internal sealed class UiaSession : IDisposable
     internal bool IsRunning { get { try { return !disposed && !process.HasExited; } catch { return false; } } }
     public string Selection { get; private set; } = "";
     public string Status { get; private set; } = "unavailable";
+    /// Why the last start gave no session: the helper's status, or what failed and how the helper exited.
+    /// For diagnosis only (the self-test records it); never logged, and it never holds field text.
+    public static string? LastStartFailure { get; private set; }
+    private static string HelperExit(Process p)
+    {
+        try
+        {
+            if (!p.HasExited) return "";
+            string error = p.StandardError.ReadToEnd().Trim();
+            return $" exit:{p.ExitCode}" + (error.Length == 0 ? "" : " stderr:" + error[..Math.Min(error.Length, 400)]);
+        }
+        catch { return ""; }
+    }
     private UiaSession(Process process) { this.process = process; }
     public static async Task<UiaSession?> StartAsync(FocusTarget target, bool selection, bool testSynthetic = false)
     {
@@ -37,10 +50,18 @@ internal sealed class UiaSession : IDisposable
             var reply = await session.CallAsync(new { command = "capture", window = target.Window.ToInt64(), process = target.Process, focus = target.Focus.ToInt64(), runtimeId = target.RuntimeId, selection });
             session.Status = reply.GetProperty("status").GetString()!;
             session.Selection = reply.TryGetProperty("text", out var text) ? text.GetString() ?? "" : "";
-            if (session.Status is not ("selected" or "empty" or "anchor")) { session.Dispose(); return null; }
+            if (session.Status is not ("selected" or "empty" or "anchor")) { LastStartFailure = "status:" + session.Status; session.Dispose(); return null; }
+            LastStartFailure = null;
             return session;
         }
-        catch { session?.Dispose(); if (session == null) { try { if (!p.HasExited) p.Kill(true); } catch { } p.Dispose(); } return null; }
+        catch (Exception e)
+        {
+            session?.Dispose();
+            if (session == null) { try { if (!p.HasExited) p.Kill(true); } catch { } }
+            LastStartFailure = "exception:" + e.GetType().Name + HelperExit(p);
+            if (session == null) p.Dispose();
+            return null;
+        }
     }
     public async Task<int> ReadCountAsync() => (await CallAsync(new { command = "stats" })).GetProperty("reads").GetInt32();
     public async Task<bool> ValidateAsync()

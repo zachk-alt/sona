@@ -88,6 +88,8 @@ Setup assistance runs only when you click Suggest after entering context and sav
 
 ## Optional correction suggestions
 
+**Not yet working on Windows (2026-10-06).** On its first Windows CI runs, the windowless helper below did not start, so with the option on Sona observes nothing and offers no suggestions. Dictation is unaffected. The self-test records the helper's failure reason (`learning_start_failure`) until this is fixed.
+
 `autoAddToDictionary` defaults to false. While false, no correction helper, subscriptions or extra correction UIA reads are created. When enabled, the first supported path is an initially empty, editable plain-text field and a single-line ASCII dictation of at most 4096 characters. Sona verifies the entire inserted span. For at most 15 seconds, select one whole existing alphabetic word and replace it using alphabetic keypresses, then pause for at least 500 ms. Backspace, punctuation, paste, navigation and later mouse clicks are outside this first capability and stop learning. A windowless helper witnesses selection metadata before forwarding input and only then considers a changed-text read. It does not read adjacent text or collect independent typing.
 
 Outside typing, navigation, paste, focus changes, unwitnessed programmatic changes, unknown ranges, a new recording or disabling the option stop observation. The parent enforces the deadline by terminating the helper process, including a hung UIA provider. Unsupported fields and non-ASCII/multiline learning are skipped; ordinary dictation remains available. Only a possible word replacement is offered for review. Adding the replacement to vocabulary requires explicit confirmation. No document history or silent dictionary writes are made.

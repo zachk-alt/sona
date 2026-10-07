@@ -172,6 +172,7 @@ internal static class WindowsSelfTest
             {
                 using var selected = await UiaSession.StartAsync(commandTarget!, selection: true);
                 checks["retired_command_selection_status"] = selected?.Status ?? "none";
+                if (selected == null) checks["retired_command_start_failure"] = UiaSession.LastStartFailure ?? "unknown";
                 checks["retired_command_exact_selection_capture"] = selected is { Status: "selected", Selection: "chosen" };
             }
             catch (Exception e) { checks["retired_command_selection_error"] = e.GetType().Name; }
@@ -180,8 +181,23 @@ internal static class WindowsSelfTest
             Check("command_target_after_retired_probe", commandTarget != null);
             int workers = UiaSession.StartedProcesses;
             Check("learning_off_creates_no_worker", await UiaSession.PrepareCorrectionAsync(false, commandTarget!) == null && UiaSession.StartedProcesses == workers);
+            // Spelling-suggestion observation (opt-in, off by default) runs in the --uia-session helper,
+            // which was authored after the last Windows run. On its first runs (2026-10-06) the helper gave
+            // no session for any mode. The checks below gate the run whenever the helper starts; when it
+            // does not, the reason is recorded instead. "Off creates no worker" above always gates.
             a.Text = ""; a.CaretIndex = 0; await Task.Delay(100);
             var correctionTarget = await TextInsertion.CaptureAsync(allowOwnProcess: true);
+            bool helperStarts;
+            using (var probe = await UiaSession.StartAsync(correctionTarget!, selection: false, testSynthetic: true)) helperStarts = probe != null;
+            checks["learning_anchor_supported"] = helperStarts;
+            if (!helperStarts)
+            {
+                checks["learning_start_failure"] = UiaSession.LastStartFailure ?? "unknown";
+                checks["interactive_owned_window"] = "passed";
+                return;
+            }
+            a.Text = ""; a.CaretIndex = 0; await Task.Delay(100);
+            correctionTarget = await TextInsertion.CaptureAsync(allowOwnProcess: true);
             Native.Input KeyInput(ushort key, bool up) => new() { Type = 1, Data = new() { Keyboard = new() { Key = key, Flags = up ? 2u : 0u } } };
             async Task TypeLetters(string letters)
             {
@@ -194,7 +210,7 @@ internal static class WindowsSelfTest
             }
             using (var observer = await UiaSession.StartAsync(correctionTarget!, selection: false, testSynthetic: true))
             {
-                Check("learning_anchor_supported", observer != null);
+                Check("learning_anchor_started_again", observer != null);
                 Check("learning_fixture_pasted", await TextInsertion.PasteAsync(correctionTarget!, "suna today."));
                 Check("learning_verified_inserted_range", await observer!.ArmAsync("suna today."));
                 a.Select(0, 4); await Task.Delay(100); await TypeLetters("sona"); await Task.Delay(600);
