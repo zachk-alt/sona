@@ -1,0 +1,4 @@
+module SonaObjC {
+    header "SonaObjC.h"
+    export *
+}

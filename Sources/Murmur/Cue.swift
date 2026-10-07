@@ -148,33 +148,38 @@ final class Cue {
     /// Explicit file overrides beat the named choice.
     func prepare(choice: String?, startFile: String? = nil, stopFile: String? = nil, reverbMix: Double = 0.4) {
         if !graphAttached {
-            engine.attach(node)
-            engine.attach(eq)
-            engine.attach(reverb)
-            // Player and EQ run mono, matching the buffers. The reverb is a
-            // stereo effect, so it sits AFTER the main mixer, where the signal
-            // is already stereo, and feeds the output directly.
-            engine.connect(node, to: eq, format: format)
-            engine.connect(eq, to: engine.mainMixerNode, format: format)
-
-            let low = eq.bands[0]
-            low.filterType = .lowShelf; low.frequency = 140; low.gain = 4; low.bypass = true
-            let top = eq.bands[1]
-            top.filterType = .lowPass; top.frequency = 9000; top.bandwidth = 0.9; top.bypass = true
-            reverb.loadFactoryPreset(.mediumRoom)
-            graphAttached = true
-            configurationObserver = NotificationCenter.default.addObserver(
-                forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
-            ) { [weak self] _ in
-                // The engine posts on an internal queue. Never rewire or tear
-                // it down there. A notification never replays an earlier cue.
-                DispatchQueue.main.async { [weak self] in self?.configurationChanged() }
-            }
+            do { try catchingFrameworkException { attachGraph() } }
+            catch { Log.write("cue: graph setup raised \(error)") }
         }
         reverb.wetDryMix = Float(max(0, min(1, reverbMix)) * 100)
         apply(choice: choice, startFile: startFile, stopFile: stopFile)
         _ = ensurePlayback()
         scheduleIdlePause()
+    }
+
+    private func attachGraph() {
+        engine.attach(node)
+        engine.attach(eq)
+        engine.attach(reverb)
+        // Player and EQ run mono, matching the buffers. The reverb is a
+        // stereo effect, so it sits AFTER the main mixer, where the signal
+        // is already stereo, and feeds the output directly.
+        engine.connect(node, to: eq, format: format)
+        engine.connect(eq, to: engine.mainMixerNode, format: format)
+
+        let low = eq.bands[0]
+        low.filterType = .lowShelf; low.frequency = 140; low.gain = 4; low.bypass = true
+        let top = eq.bands[1]
+        top.filterType = .lowPass; top.frequency = 9000; top.bandwidth = 0.9; top.bypass = true
+        reverb.loadFactoryPreset(.mediumRoom)
+        graphAttached = true
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
+        ) { [weak self] _ in
+            // The engine posts on an internal queue. Never rewire or tear
+            // it down there. A notification never replays an earlier cue.
+            DispatchQueue.main.async { [weak self] in self?.configurationChanged() }
+        }
     }
 
     private func outputFormat() -> AVAudioFormat? {
@@ -193,11 +198,31 @@ final class Cue {
         // arrives. Do not stop its newly scheduled sound a second time.
         if engine.isRunning, let current = outputFormat(), current == connectedOutputFormat { return }
         // A device change is a recovery, not a wake, even mid-idle.
-        node.stop(); engine.stop(); outputNeedsReconnect = true; idlePaused = false
+        haltAfterFailure(nil)
     }
 
+    /// Stops playback after a device change or a raised framework exception.
+    /// The next strike reconnects and restarts the graph from scratch.
+    private func haltAfterFailure(_ exception: Error?) {
+        if let exception { Log.write("cue: playback raised \(exception)") }
+        do { try catchingFrameworkException { node.stop(); engine.stop() } }
+        catch { Log.write("cue: stop raised \(error)") }
+        outputNeedsReconnect = true; idlePaused = false
+        if exception != nil { lastFailure = "exception" }
+    }
+
+    /// A cue plays on every key press, from the main thread. AVFAudio raises
+    /// (rather than throws) for some graph states, such as a player started
+    /// on an engine a device change just stopped; uncaught, that would leave
+    /// the main queue dead. Any raise is contained, logged and recovered on
+    /// the next strike.
     @discardableResult
     private func ensurePlayback() -> Bool {
+        do { return try catchingFrameworkException { ensurePlaybackUnguarded() } }
+        catch { haltAfterFailure(error); return false }
+    }
+
+    private func ensurePlaybackUnguarded() -> Bool {
         guard graphAttached else { return false }
         let began = DispatchTime.now().uptimeNanoseconds
         guard let output = outputFormat() else {
@@ -389,7 +414,8 @@ final class Cue {
 
     private func strike(_ buffer: AVAudioPCMBuffer?) {
         guard let buffer, ensurePlayback() else { return }
-        node.scheduleBuffer(buffer, at: nil, options: .interrupts)
+        do { try catchingFrameworkException { node.scheduleBuffer(buffer, at: nil, options: .interrupts) } }
+        catch { haltAfterFailure(error); return }
         scheduleIdlePause()
     }
 
@@ -420,7 +446,8 @@ final class Cue {
         // output, where the cost was measured, and look again next window in
         // case the route moves back.
         guard outputIsBuiltIn else { scheduleIdlePause(); return }
-        node.stop(); engine.pause()
+        do { try catchingFrameworkException { node.stop(); engine.pause() } }
+        catch { haltAfterFailure(error); return }
         idlePaused = true
     }
 
@@ -458,6 +485,14 @@ final class Cue {
     var testingWetDryMix: Float { reverb.wetDryMix }
     func testingStopEngine() { engine.stop() }
     func testingPausePlayer() { node.pause() }
+    /// Strikes a buffer whose format the player was not connected with, so
+    /// AVFAudio raises inside scheduleBuffer.
+    func testingStrikeMismatchedBuffer() {
+        let stereo = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: stereo, frameCapacity: 4800)!
+        buffer.frameLength = 4800
+        strike(buffer)
+    }
     func testingPostConfigurationChange() {
         NotificationCenter.default.post(name: .AVAudioEngineConfigurationChange, object: engine)
     }

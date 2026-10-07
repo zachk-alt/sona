@@ -145,6 +145,18 @@ enum CleanupError: Error { case unavailable(String) }
         check(!cue.testingEngineRunning, "Moving back to the built-in output releases it at the next window")
         cue.testingOutputIsBuiltIn = nil
 
+        // AVFAudio raises NSException for some graph states. A raise inside a
+        // cue must be contained: uncaught on the main thread, AppKit swallows
+        // it and the main queue (every later key press) never runs again.
+        cue.start(); _ = try cue.testingRender(seconds: 0.7)
+        cue.testingStrikeMismatchedBuffer()
+        check(Log.lines.last?.hasPrefix("cue: playback raised com.apple.coreaudio.avfaudio") == true,
+              "A raised AVFAudio exception during a cue is contained and logged")
+        cue.stop()
+        check(cue.testingEngineRunning && Log.lines.last == "cue: playback_recovered",
+              "The next cue after a raised exception recovers")
+        check(sameSound(stopNow, try cue.testingRender(seconds: 0.7)), "Recovery after a raised exception plays only the new cue")
+
         let fresh = try Cue.testingOffline()
         fresh.testingIdleDelay = 0.05
         fresh.prepare(choice: "sona-portable", reverbMix: 0)

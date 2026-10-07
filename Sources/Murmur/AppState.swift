@@ -3,8 +3,25 @@ import AVFoundation
 import ApplicationServices
 import Foundation
 
+/// What a session needs from the start/stop cues. Tests substitute it.
+protocol CuePlaying: AnyObject {
+    func prepare(choice: String?, startFile: String?, stopFile: String?, reverbMix: Double)
+    func setSound(_ id: String)
+    func start()
+    func stop()
+}
+extension Cue: CuePlaying {}
+
 /// Wires the hotkey to the microphone, the transcriber, the cleanup pass and
 /// the focused text field.
+///
+/// Every dictation is a numbered session, and every wait a session can get
+/// stuck in has a deadline. Apple's speech analyzer or the microphone can
+/// stall without ever throwing; before these deadlines a single stall left
+/// the phase stuck and every later key press was ignored until Sona was quit
+/// and reopened. A stage that overruns is abandoned (its transcriber is
+/// replaced, never shared with the next session), the app returns to ready,
+/// and late results from the abandoned session are discarded by its number.
 @MainActor
 final class AppState {
 
@@ -15,11 +32,31 @@ final class AppState {
     /// by the time anyone begins speaking the mic is already live.
     private static let micDelay: TimeInterval = 0.15
 
+    /// Longest each stage may take before the session is abandoned. Normal
+    /// dictations finish every stage far inside these.
+    struct Deadlines {
+        /// Key held to microphone open, including the first-launch speech warmup.
+        var opening: TimeInterval = 10
+        /// Release to final transcript.
+        var transcribing: TimeInterval = 15
+        /// Transcript to inserted text: the bounded cleanup bridge plus insertion.
+        var finishing: TimeInterval
+        /// Discard to released analyzer.
+        var cancelling: TimeInterval = 5
+
+        init(bridgeTimeout: TimeInterval) { finishing = bridgeTimeout + 8 }
+    }
+
     private var config: Config
     private let statusBar = StatusBarController()
-    private let cue = Cue()
-    private let capture = AudioCapture()
-    private let transcriber: Transcriber = AppleTranscriber()
+    private let cue: CuePlaying
+    private let capture: AudioCapturing
+    private let makeTranscriber: () -> Transcriber
+    /// Replaced, not reused, after a stalled session.
+    private var transcriber: Transcriber
+    private let deadlines: Deadlines
+    private var sessionID = 0
+    private var watchdog: DispatchWorkItem?
     private var operations: BridgeOperations
     private var textSettings: TextSettingsController?
     private let corrections = CorrectionObservation()
@@ -38,21 +75,41 @@ final class AppState {
     private var warmup: Task<Void, Never>?
     private var sessionMode: CleanupMode = .prose
 
-    init() {
-        config = Config.load()
+    init(config: Config = Config.load(),
+         makeTranscriber: @escaping () -> Transcriber = { AppleTranscriber() },
+         capture: AudioCapturing = AudioCapture(),
+         cue: CuePlaying = Cue(),
+         deadlines: Deadlines? = nil) {
+        self.config = config
+        self.makeTranscriber = makeTranscriber
+        self.transcriber = makeTranscriber()
+        self.capture = capture
+        self.cue = cue
         let selected = Self.makeCleanup(config)
         operations = selected.0
         backendLabel = selected.1
+        self.deadlines = deadlines ?? Deadlines(bridgeTimeout: selected.2)
+
+        capture.onLevel = { [weak self] level in
+            guard let self, phase == .recording else { return }
+            statusBar.setLevel(level)
+        }
+        capture.onSpectrum = { [weak self] bands in
+            guard let self, phase == .recording else { return }
+            statusBar.setSpectrum(bands)
+        }
     }
 
-    private static func makeCleanup(_ config: Config) -> (BridgeOperations, String) {
+    private static func makeCleanup(_ config: Config) -> (BridgeOperations, String, TimeInterval) {
         let resources = Bundle.main.resourceURL
         let bridge = resources?.appendingPathComponent("bridge/sona-cleanup.mjs")
             ?? URL(fileURLWithPath:FileManager.default.currentDirectoryPath).appendingPathComponent("bridge/sona-cleanup.mjs")
         let bundled = resources?.appendingPathComponent("runtime/node").path
         let node = bundled.flatMap { FileManager.default.isExecutableFile(atPath:$0) ? $0 : nil } ?? CLIResolver.resolve("node")
         let label = config.ai.provider == "none" ? "Plain dictation and saved phrases" : "\(config.ai.provider.capitalized), \(config.ai.model)"
-        return (BridgeOperations(node:node,bridge:bridge.path,timeout:Double(config.ai.timeoutMs)/1000+2),label)
+        // BridgeOperations clamps the same way; the finishing deadline must outlast it.
+        let timeout = min(35, max(1, Double(config.ai.timeoutMs)/1000+2))
+        return (BridgeOperations(node:node,bridge:bridge.path,timeout:timeout),label,timeout)
     }
 
     private func makeMonitor() -> HotKeyMonitor? {
@@ -160,18 +217,6 @@ final class AppState {
             self?.statusBar.refreshMenu()
         }
 
-        capture.onLevel = { [weak self] level in
-            guard let self, phase == .recording else { return }
-            statusBar.setLevel(level)
-        }
-        capture.onSpectrum = { [weak self] bands in
-            guard let self, phase == .recording else { return }
-            statusBar.setSpectrum(bands)
-        }
-        capture.onBuffer = { [weak self] buffer in
-            self?.transcriber.feed(buffer)
-        }
-
         cue.prepare(choice: config.sound, startFile: config.startSound, stopFile: config.stopSound,
                     reverbMix: config.cueReverb)
         statusBar.setSounds(Cue.available.map { (id: $0.id, title: $0.title) },
@@ -188,7 +233,8 @@ final class AppState {
 
         // Absorb the one-time model warmup (measured 2.3-2.6 s on a fresh
         // process) now, so the first real dictation is not the slow one.
-        warmup = Task { await transcriber.prepare() }
+        let launchTranscriber = transcriber
+        warmup = Task { await launchTranscriber.prepare() }
 
         // AXIsProcessTrusted is the honest check. tapCreate can succeed and
         // then silently deliver nothing, which looks identical to a working app
@@ -215,7 +261,7 @@ final class AppState {
     // MARK: - Hotkey
 
     /// Returns false only for a gesture the app declines to act on.
-    private func handle(_ event: HotKeyEvent) -> Bool {
+    func handle(_ event: HotKeyEvent) -> Bool {
         switch event {
         case .begin:
             let accepted = beginRecording()
@@ -262,6 +308,8 @@ final class AppState {
         insertionTarget = FocusedElement.captureTarget()
         if config.autoAddToDictionary { observationBaseline = SelectionSnapshot.emptyFieldBaseline() }
         Log.write("insert target: \(insertionTarget?.element == nil ? "window compatibility" : "Accessibility field")")
+        sessionID &+= 1
+        let id = sessionID
         phase = .armed
 
         // NOTHING user-visible happens until the delay elapses. Right Command
@@ -270,7 +318,7 @@ final class AppState {
         // hit Cmd-C. Everything below is committed to only once the key is
         // still down at +150 ms, by which point this is a real dictation.
         let work = DispatchWorkItem { [weak self] in
-            guard let self, phase == .armed else { return }
+            guard let self, sessionID == id, phase == .armed else { return }
             pendingMicStart = nil
             phase = .recording
             Log.write("record: opening mic")
@@ -281,38 +329,60 @@ final class AppState {
             // the user speaks so the pre-warmed process has the right prompt.
             sessionMode = currentMode()
 
-            microphoneStart = Task { await self.openMicrophone() }
+            let transcriber = self.transcriber
+            arm(deadlines.opening, id, stage: "dictation did not start",
+                message: "Dictation didn't start in time. Try again.")
+            microphoneStart = Task { await self.openMicrophone(id, transcriber) }
         }
         pendingMicStart = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.micDelay, execute: work)
         return true
     }
 
-    private func openMicrophone() async -> Bool {
+    private func openMicrophone(_ id: Int, _ transcriber: Transcriber) async -> Bool {
         // Warmup and begin both create speech modules. Serialize them, including
         // when the first press arrives before the launch warmup has finished.
         await warmup?.value
-        guard phase == .recording, !Task.isCancelled else { return false }
+        guard isCurrent(id, .recording), !Task.isCancelled else { return false }
+        var step = OpeningStep.speech
         do {
             try await transcriber.begin()
-            guard phase == .recording, !Task.isCancelled else { return false }
+            // From here on, giving up must release what begin() started: after
+            // an abandon nothing else owns this transcriber. Finish and discard
+            // await this task before their own cancel(), so calls never overlap.
+            guard isCurrent(id, .recording), !Task.isCancelled else { await transcriber.cancel(); return false }
             let format = await transcriber.requiredFormat
-            guard phase == .recording, !Task.isCancelled else { return false }
+            guard isCurrent(id, .recording), !Task.isCancelled else { await transcriber.cancel(); return false }
+            step = .microphone
+            // Buffers go to THIS session's transcriber, never a replacement.
+            capture.onBuffer = { buffer in transcriber.feed(buffer) }
             try capture.start(convertingTo: format)
+            // The mic is open; how long the user speaks is theirs.
+            disarm()
             return true
         } catch {
-            Log.write("record: FAILED to open mic: \(error)")
+            Log.write("record: FAILED to open \(step == .speech ? "speech engine" : "mic"): \(error)")
             // Stop/discard owns teardown once it changes phase. Otherwise an
             // opening failure must finish cancelling before another press.
-            if phase == .recording {
+            if isCurrent(id, .recording) {
                 phase = .cancelling
+                sessionFailure = step == .speech
+                    ? "Speech recognition couldn't start. Try again in a moment."
+                    : "The microphone is unavailable or switching. Try again."
                 capture.stop()
+                arm(deadlines.cancelling, id, stage: "cancel did not finish", message: nil)
                 await transcriber.cancel()
-                completeSession()
+                complete(id)
+            } else {
+                // Superseded while opening (released, discarded or abandoned).
+                // A newer session may own the microphone; only the analyzer goes.
+                await transcriber.cancel()
             }
             return false
         }
     }
+
+    private enum OpeningStep { case speech, microphone }
 
     private func finishRecording() {
         if phase == .armed {
@@ -320,6 +390,7 @@ final class AppState {
             return
         }
         guard phase == .recording else { return }
+        let id = sessionID
         phase = .processing
         pendingMicStart?.cancel()
         pendingMicStart = nil
@@ -328,18 +399,21 @@ final class AppState {
         cue.stop()
         statusBar.showProcessing()
         capture.stop()
+        arm(deadlines.transcribing, id, stage: "transcription did not finish",
+            message: "Transcription stalled. Try again.")
 
         let opening = microphoneStart
         let mode = sessionMode
+        let transcriber = self.transcriber
         Task {
-            defer { completeSession() }
+            defer { complete(id) }
             // begin() can still be suspended when the user stops. Wait for it
             // before finishing/cancelling its analyzer, and never open the mic late.
             guard await opening?.value == true else {
                 await transcriber.cancel()
                 return
             }
-            await transcribeAndInsert(mode: mode)
+            await transcribeAndInsert(id, transcriber, mode: mode)
         }
     }
 
@@ -349,22 +423,73 @@ final class AppState {
             return
         }
         guard phase == .recording else { return }
+        let id = sessionID
         phase = .cancelling
         pendingMicStart?.cancel()
         pendingMicStart = nil
         microphoneStart?.cancel()
         capture.stop()
         operations.cancel()
+        arm(deadlines.cancelling, id, stage: "cancel did not finish", message: nil)
         let opening = microphoneStart
+        let transcriber = self.transcriber
         Task {
             _ = await opening?.value
             await transcriber.cancel()
-            completeSession()
+            complete(id)
         }
+    }
+
+    /// Completes session `id` unless a deadline already abandoned it.
+    private func complete(_ id: Int) {
+        guard sessionID == id, phase != .idle else { return }
+        completeSession()
+    }
+
+    private func isCurrent(_ id: Int, _ expected: Phase) -> Bool { sessionID == id && phase == expected }
+
+    // MARK: - Deadlines
+
+    /// One deadline at a time: each stage replaces the previous stage's.
+    private func arm(_ seconds: TimeInterval, _ id: Int, stage: String, message: String?) {
+        watchdog?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.abandon(id, stage: stage, message: message)
+        }
+        watchdog = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
+    }
+
+    private func disarm() {
+        watchdog?.cancel()
+        watchdog = nil
+    }
+
+    /// A stage overran. The stuck work keeps its own transcriber, which is
+    /// replaced rather than cancelled here: the abandoned analyzer may still be
+    /// running, and the transcriber is not safe to call from two tasks at once.
+    /// The stuck task releases it itself if it ever returns (openMicrophone),
+    /// and late words are kept in Copy pending text (retainLate).
+    private func abandon(_ id: Int, stage: String, message: String?) {
+        guard sessionID == id, phase != .idle else { return }
+        Log.write("watchdog: \(stage) in time; session reset")
+        transcriber = makeTranscriber()
+        // A stalled launch warmup must not hold the next session too.
+        warmup = nil
+        pendingMicStart?.cancel()
+        microphoneStart?.cancel()
+        capture.stop()
+        operations.cancel()
+        if let message { sessionFailure = message }
+        completeSession()
     }
 
     /// One exit for every completed, empty, failed, or discarded session.
     private func completeSession() {
+        #if SESSION_RECOVERY_TESTS
+        testingLastMessage = sessionFailure
+        #endif
+        disarm()
         pendingMicStart?.cancel()
         pendingMicStart = nil
         microphoneStart = nil
@@ -378,7 +503,7 @@ final class AppState {
 
     // MARK: - The pipeline
 
-    private func transcribeAndInsert(mode: CleanupMode) async {
+    private func transcribeAndInsert(_ id: Int, _ transcriber: Transcriber, mode: CleanupMode) async {
         let raw: String
         do {
             raw = try await transcriber.finish()
@@ -387,16 +512,21 @@ final class AppState {
             await transcriber.cancel()
             return
         }
-        guard phase == .processing else { return }
+        guard isCurrent(id, .processing) else { retainLate(raw); return }
         Log.write("transcribe: \(raw.count) chars")
         guard !raw.isEmpty else { return }
+        arm(deadlines.finishing, id, stage: "cleanup or insertion did not finish",
+            message: "Sona stalled finishing that dictation. Try again.")
 
         // Dictation retains the exact raw local text on any cleanup failure.
         let request = BridgeRequest(operation:"dictate",transcript:raw,
             mode:mode == .strict ? "strict" : "prose",cleanupEnabled:config.cleanupEnabled)
         let result = await operations.perform(request)
+        guard isCurrent(id, .processing) else { retainLate(raw); return }
         let text = result.insertionText(raw:raw,isRewrite:false) ?? raw
         let method = TextInserter.insert(text,into:insertionTarget)
+        // The text is placed; only fixed pauses follow.
+        disarm()
         Log.write("insert: \(method.rawValue) (\(text.count) chars)")
         if let reason = TextInserter.lastPendingReason { Log.write("insert blocked: \(reason.diagnosticCode)") }
         if method == .pending {
@@ -404,12 +534,27 @@ final class AppState {
         }
         if method == .paste {
             try? await Task.sleep(for:.milliseconds(250))
-            if config.autoAddToDictionary, let baseline = observationBaseline {
+            if isCurrent(id, .processing), config.autoAddToDictionary, let baseline = observationBaseline {
                 corrections.verifyAndBegin(text:text,before:baseline)
             }
             try? await Task.sleep(for:.milliseconds(200))
         }
     }
+
+    /// A session its deadline abandoned can still finish. Its words go to Copy
+    /// pending text only: a nil target never pastes into whatever is focused now.
+    private func retainLate(_ text: String) {
+        guard !text.isEmpty else { return }
+        TextInserter.insert(text, into: nil)
+        Log.write("transcribe: late result retained (\(text.count) chars)")
+        // Only while nothing newer owns the panel.
+        if phase == .idle { statusBar.showError("Text is ready in Copy pending text.") }
+    }
+
+    #if SESSION_RECOVERY_TESTS
+    var testingPhase: String { "\(phase)" }
+    private(set) var testingLastMessage: String?
+    #endif
 
     // MARK: - Context
 

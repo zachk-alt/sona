@@ -61,11 +61,19 @@ final class StatusBarController {
     private(set) var cleanupEnabled = true
     private var backendLabel = "checking..."
 
+    /// Session tests drive real sessions with nothing on screen: no menu bar
+    /// icon and no panel. Production builds never set this.
+    #if SESSION_RECOVERY_TESTS
+    private static let headless = true
+    #else
+    private static let headless = false
+    #endif
+
     init() {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.autosaveName = "Sona.MenuBar"
         item.behavior = []
-        item.isVisible = true
+        item.isVisible = !Self.headless
         if let button = item.button {
             button.image = idleIcon
             button.imagePosition = .imageOnly
@@ -328,7 +336,7 @@ final class StatusBarController {
         panel.formations?.forEach { $0.stop() }
         // orderFrontRegardless never activates this app, so focus stays in
         // the field the text is about to land in.
-        panel.orderFrontRegardless()
+        if !Self.headless { panel.orderFrontRegardless() }
     }
 
     func showError(_ message: String) {
@@ -353,7 +361,7 @@ final class StatusBarController {
         item.button?.image = recordingIcon
         wave.startProcessing()
         startLights()
-        panel.orderFrontRegardless()
+        if !Self.headless { panel.orderFrontRegardless() }
     }
 
     func showIdle() {
@@ -606,7 +614,8 @@ private final class Formation {
     let follower: CAGradientLayer
     let tail: CAGradientLayer
 
-    /// Radians. Positive is CLOCKWISE on screen here (measured, not assumed).
+    /// Radians. Positive turns COUNTERCLOCKWISE on screen (measured 2026-10-06
+    /// with this exact layer setup; an earlier note here said clockwise).
     static let baseTurn = 105.0 * Double.pi / 180
 
     init(frame: CGRect) {
@@ -622,9 +631,9 @@ private final class Formation {
             group.addSublayer(layer)
         }
         tail.opacity = 0
-        // The arc's rest position, measured on screen, is at bearing ~255 deg
-        // (left edge). Turn the whole group so the lights meet at the top
-        // centre and the bottom centre instead.
+        // Measured on screen: the arc's own peak sits at bearing ~284 deg (left,
+        // slightly up), and this turn puts the merged lights at rest at the
+        // BOTTOM centre (bearing ~179 deg).
         group.transform = CATransform3DMakeRotation(Self.baseTurn, 0, 0, 1)
         track.addSublayer(group)
     }
@@ -646,13 +655,14 @@ private final class Formation {
 /// directions and meet again somewhere else, arriving together. Their
 /// distances differ, so their speeds differ. They pause merged, travel a way
 /// together (either direction), pause, and go again. Where they meet, which
-/// one goes clockwise, how far they travel together and how long each leg
+/// one goes which way, how far they travel together and how long each leg
 /// takes are all drawn at random inside limits, and the script is rebuilt
 /// every time it is needed, so no two processing runs show the same motion. The
-/// last cycle brings them home to the top centre so a repeat is seamless.
+/// last cycle brings them home to their rest position (the bottom centre) so a
+/// repeat is seamless.
 private struct LightScript {
     private(set) var times: [Double] = [0]
-    private(set) var one: [Double] = [0]      // cumulative radians, positive = clockwise on screen
+    private(set) var one: [Double] = [0]      // cumulative radians, positive = counterclockwise on screen
     private(set) var two: [Double] = [0]
     private var timing: [CAMediaTimingFunction] = []
     private var glowTimes: [Double] = [0]
@@ -675,7 +685,7 @@ private struct LightScript {
 
         while true {
             let homing = s.total >= seconds - 8
-            // 1. Split and meet. Light A goes clockwise by delta, B the other
+            // 1. Split and meet. One light turns by delta, the other the opposite
             //    way by the rest of the circle, so they arrive at one place.
             let here = ((a.truncatingRemainder(dividingBy: twoPi)) + twoPi).truncatingRemainder(dividingBy: twoPi)
             var delta = homing ? (twoPi - here).truncatingRemainder(dividingBy: twoPi)

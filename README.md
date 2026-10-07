@@ -124,9 +124,15 @@ Sona keeps recordings, transcripts, selected text and unsaved setup suggestions 
 swift build -c release
 bash scripts/test-hotkeys.sh
 bash scripts/test-assistant-panel-placement.sh
+bash scripts/test-cues.sh
+bash scripts/test-session-recovery.sh
+bash scripts/test-exception-recovery.sh
+bash scripts/test-audio-recovery.sh
 node --test bridge/test/*.test.mjs
 ./bundle.sh --no-install
 ```
+
+`test-session-recovery.sh` drives real dictation sessions with a stalling fake speech engine, with nothing on screen. `test-exception-recovery.sh` raises real Objective-C exceptions in child processes and checks the last-resort recovery. `test-audio-recovery.sh` uses your real microphone and holds it exclusively for about two and a half seconds in total, in two grabs, to reproduce a busy microphone; it skips without a microphone or microphone permission.
 
 `bundle.sh` requires the local identity from `make-signing-cert.sh` and prepares the pinned Node runtime. The `--no-install` option leaves the signed app in a temporary build folder. Windows source build and test instructions are in [windows/README.md](windows/README.md).
 

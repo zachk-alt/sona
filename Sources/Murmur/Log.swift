@@ -10,14 +10,40 @@ import Foundation
 /// Transcript text is never written, only its length.
 enum Log {
 
-    private static let url = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Logs/Murmur.log")
+    private static let url: URL = {
+        #if SESSION_RECOVERY_TESTS || SONA_TEST_LOG
+        // Test builds never write into the real app's diagnostics.
+        return FileManager.default.temporaryDirectory.appendingPathComponent("sona-tests.log")
+        #else
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Murmur.log")
+        #endif
+    }()
     private static let queue = DispatchQueue(label: "murmur.log")
     private static let formatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss.SSS"
         return f
     }()
+
+    /// The log appends across launches, so the session that ended in a quit
+    /// and reopen is still readable afterwards. Each launch starts with a
+    /// dated line (the per-line stamps carry only the time of day), and a log
+    /// past `rotationBytes` moves to Murmur.previous.log first.
+    static func beginLaunch() {
+        let rotationBytes = 2_000_000
+        queue.sync {
+            let manager = FileManager.default
+            if let size = (try? manager.attributesOfItem(atPath: url.path))?[.size] as? Int, size > rotationBytes {
+                let previous = url.deletingLastPathComponent().appendingPathComponent("Murmur.previous.log")
+                try? manager.removeItem(at: previous)
+                try? manager.moveItem(at: url, to: previous)
+            }
+        }
+        let stamp = ISO8601DateFormatter.string(from: Date(), timeZone: .current,
+                                                formatOptions: [.withFullDate, .withTime, .withColonSeparatorInTime, .withSpaceBetweenDateAndTime])
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+        write("==== launch \(stamp) pid \(ProcessInfo.processInfo.processIdentifier) version \(version) ====")
+    }
 
     static func write(_ message: String) {
         let line = "\(formatter.string(from: Date()))  \(message)\n"

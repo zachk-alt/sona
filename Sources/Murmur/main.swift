@@ -250,7 +250,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-let app = NSApplication.shared
+Log.beginLaunch()
+// The subclass must be the first thing to touch the shared application.
+let app = SonaApplication.shared
+MainQueueRecovery.installUncaughtHandler()
 let delegate = AppDelegate()
 app.delegate = delegate
 app.setActivationPolicy(.accessory)

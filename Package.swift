@@ -5,8 +5,11 @@ let package = Package(
     name: "Murmur",
     platforms: [.macOS("26.0")],
     targets: [
+        // Converts AVFAudio's Objective-C exceptions into Swift errors.
+        .target(name: "SonaObjC", path: "Sources/SonaObjC"),
         .executableTarget(
             name: "Murmur",
+            dependencies: ["SonaObjC"],
             path: "Sources/Murmur",
             // Retired second-hotkey, screen capture and computer-control code is not shipped.
             exclude: [
