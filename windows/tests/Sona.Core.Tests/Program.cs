@@ -304,6 +304,50 @@ try
     }
 }
 finally { Directory.Delete(temp, recursive: true); }
+// Recording panel parity with the Mac (vectors computed with the verbatim AudioCapture.updateSpectrum math).
+float[] Bands(float[] samples, float rate) { var bands = new float[PanelSpectrum.BandCount]; PanelSpectrum.Analyze(samples, rate, bands); return bands; }
+bool Near(float[] actual, float[] expected) => actual.Length == expected.Length && actual.Zip(expected).All(p => Math.Abs(p.First - p.Second) <= 0.002f);
+Check(Math.Abs(PanelSpectrum.Frequency(0) - 80) < 0.01 && Math.Abs(PanelSpectrum.Frequency(27) - 955.55) < 0.05 && Math.Abs(PanelSpectrum.Frequency(47) - 6000) < 0.5, "panel spectrum band centers match the Mac");
+var vectorA = Enumerable.Range(0, 4410).Select(i => (float)(0.1 * Math.Sin(2 * Math.PI * 1000 * i / 44100.0))).ToArray();
+var expectedA = new float[48]; expectedA[27] = 1; expectedA[28] = 1; expectedA[29] = 0.2629f;
+Check(Near(Bands(vectorA, 44100), expectedA), "panel spectrum vector A (1 kHz sine)");
+var vectorB = Enumerable.Range(0, 4800).Select(i => { double t = i / 48000.0; return (float)(0.3 * Math.Sin(2 * Math.PI * 300 * t) + 0.05 * Math.Sin(2 * Math.PI * 2500 * t)); }).ToArray();
+var expectedB = new float[48];
+new float[] { 0.0000f, 0.0182f, 0.0374f, 0.0000f, 0.0000f, 0.1456f, 0.2565f, 0.1632f, 0.2476f, 0.5280f, 0.4470f, 0.8095f, 1.0000f, 1.0000f, 1.0000f, 1.0000f, 1.0000f, 0.8519f, 0.6234f, 0.3978f, 0.2096f, 0.0817f, 0.0000f }.CopyTo(expectedB, 0);
+expectedB[37] = 0.4438f; expectedB[38] = 0.3719f;
+Check(Near(Bands(vectorB, 48000), expectedB), "panel spectrum vector B (300 Hz and 2.5 kHz)");
+Check(Bands(new float[1024], 48000).All(v => v == 0), "panel spectrum vector C (silence)");
+uint lcg = 12345;
+var vectorD = Enumerable.Range(0, 1024).Select(_ => { lcg = unchecked(lcg * 1664525 + 1013904223); return ((lcg >> 8) / (float)(1 << 24) * 2 - 1) * 0.05f; }).ToArray();
+Check(Near(Bands(vectorD, 48000), new[] { 0.2080f, 0.2017f, 0.1901f, 0.1733f, 0.1534f, 0.1380f, 0.1408f, 0.1722f, 0.2195f, 0.2589f, 0.2717f, 0.2457f, 0.1825f, 0.1287f, 0.0915f, 0.1568f, 0.1763f, 0.3079f, 0.5203f, 0.3901f, 0.3777f, 0.2606f, 0.3889f, 0.2987f, 0.4729f, 0.3679f, 0.0885f, 0.3387f, 0.3120f, 0.3758f, 0.4705f, 0.1962f, 0.3277f, 0.3615f, 0.1409f, 0.5269f, 0.3009f, 0.4609f, 0.5556f, 0.4218f, 0.7325f, 0.5955f, 0.0000f, 0.5687f, 0.8198f, 0.2948f, 0.3085f, 0.6877f }), "panel spectrum vector D (noise)");
+var synthetic = new float[48]; PanelSpectrum.Synthetic(0.1, synthetic);
+Check(synthetic.All(v => v >= 0.05f && v <= 1f) && Math.Abs(synthetic[0] - (float)(0.45 + 0.3 * Math.Sin(0.26) + 0.2 * Math.Sin(0.61))) < 1e-6, "panel preview synthetic voice matches the Mac formula");
+var bars = new BarMotion();
+bars.StartRecording();
+Check(bars.Height(0) == 2 && Math.Abs(bars.Alpha(0) - 0.55) < 1e-12, "silent bars are 2 DIP dots at alpha 0.55");
+var loud = Enumerable.Repeat(1f, 48).ToArray(); bars.SetSpectrum(loud);
+bars.Advance(1 / 60.0);
+Check(Math.Abs(bars.Level(0) - 0.45) < 1e-9 && Math.Abs(bars.Level(BarMotion.BarCount - 1) - (0.45 + 0.15 * (47 % 3) / 2.0)) < 1e-9, "bars rise at the Mac per-band rates");
+for (int i = 0; i < 600; i++) bars.Advance(1 / 60.0);
+Check(Math.Abs(bars.Height(10) - (2 + 56 * (0.9 + 0.1 * (Math.Sin(bars.Phase + 7) * 0.5 + 0.5)))) < 1e-6 && Math.Abs(bars.Alpha(10) - 1) < 1e-9, "full bands reach the shimmering 58 DIP top at alpha 1");
+var stepped = new BarMotion(); stepped.StartRecording(); stepped.SetSpectrum(loud); stepped.Advance(1 / 30.0);
+var twice = new BarMotion(); twice.StartRecording(); twice.SetSpectrum(loud); twice.Advance(1 / 60.0); twice.Advance(1 / 60.0);
+Check(Math.Abs(stepped.Level(30) - twice.Level(30)) < 1e-9, "bar easing is frame-rate independent");
+bars.StartProcessing(); bars.SetSpectrum(new float[48]);
+for (int i = 0; i < 300; i++) bars.Advance(1 / 60.0);
+Check(Enumerable.Range(0, BarMotion.BarCount).All(i => bars.Level(i) > 0.09 && bars.Level(i) < 0.63), "processing wave stays between 0.10 and 0.62");
+bars.Stop();
+Check(bars.Mode == BarMode.Idle && bars.Level(40) == 0 && bars.Height(40) == 2, "stopping returns the bars to zero");
+var script = LightScript.Generate(new Random(5));
+var rest = script.At(0);
+Check(rest.One == 0 && rest.Two == 0 && rest.Tail == 1, "lights start merged at rest with the tail lit");
+Check(script.Total > 82 && script.Total < 95, "light script lasts about 90 seconds");
+var end = script.At(script.Total - 1e-9);
+Check(Math.Abs(Math.IEEERemainder(end.One, 2 * Math.PI)) < 1e-6 && Math.Abs(Math.IEEERemainder(end.Two, 2 * Math.PI)) < 1e-6, "light script homes to rest so it repeats seamlessly");
+var split = script.At(0.6);
+Check(Math.Sign(split.One) != Math.Sign(split.Two) && split.Tail < 1, "lights leave in opposite directions and the tail fades");
+Check(LightScript.EaseInOut(0.5) is > 0.4999 and < 0.5001 && LightScript.EaseInOut(0.25) is > 0.12 and < 0.13, "ease in and out matches cubic-bezier(0.42, 0, 0.58, 1)");
+Check(PanelTiming.Smoothstep(0.5) == 0.5 && PanelTiming.Smoothstep(1) == 1, "dismissal smoothstep");
 Console.WriteLine($"{tests} checks passed.");
 return 0;
 

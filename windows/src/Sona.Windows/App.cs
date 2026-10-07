@@ -36,6 +36,7 @@ internal sealed class App : Application
     private WordCorrection? correction;
     private bool ready, busy, recording, quitting;
     private string latest = "";
+    private string? sessionFailure;
     private System.Media.SoundPlayer? startCue, stopCue;
 
     [STAThread]
@@ -48,7 +49,20 @@ internal sealed class App : Application
         // Old worker invocations are inert, even if another process still has their names.
         if (args.Length == 1 && args[0] is "--assistant-context" or "--assistant-context-test" or "--assistant-action") return;
         var app = new App { ShutdownMode = ShutdownMode.OnExplicitShutdown };
-        if (args.Length >= 2 && args[0] == "--self-test")
+        if (args.Length >= 2 && args[0] == "--panel-preview")
+        {
+            // Offscreen panel renders for visual review. Never opens the microphone, hotkeys, network, settings or tray.
+            app.Startup += (_, _) =>
+            {
+                try { PanelPreview.Write(args[1]); app.Shutdown(0); }
+                catch (Exception e)
+                {
+                    try { Directory.CreateDirectory(args[1]); File.WriteAllText(Path.Combine(args[1], "panel-preview-error.txt"), e.ToString()); } catch { }
+                    app.Shutdown(1);
+                }
+            };
+        }
+        else if (args.Length >= 2 && args[0] == "--self-test")
         {
             app.Startup += async (_, _) =>
             {
@@ -87,11 +101,35 @@ internal sealed class App : Application
         menu.Items.Add("Quit Sona", null, (_, _) => Dispatcher.InvokeAsync(QuitAsync));
         tray.ContextMenuStrip = menu; tray.DoubleClick += (_, _) => Dispatcher.Invoke(OpenSettings);
         tray.BalloonTipClicked += (_, _) => Dispatcher.Invoke(() => { if (correction != null) ReviewCorrection(); else ReviewLatest(); });
-        hotkey = new HotkeyService(); hotkey.Triggered += async () => await ToggleAsync();
-        panel = new RecordingPanel();
-        recorder.Level += v => Dispatcher.BeginInvoke(() => panel?.SetLevel(v));
-        recorder.UnexpectedStop += e => Dispatcher.BeginInvoke(async () => { await CancelAsync(); Notify("The microphone stopped. Check your selected device and Windows microphone access."); });
-        limit.Tick += async (_, _) => { limit.Stop(); if (recording) await FinishAsync(); };
+        // Anything that still escapes is logged (type and stack only) instead of silently ending Sona.
+        DispatcherUnhandledException += OnDispatcherUnhandledException;
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => { if (e.ExceptionObject is Exception error) Log("fatal", error); };
+        TaskScheduler.UnobservedTaskException += (_, e) => { Log("task", e.Exception); e.SetObserved(); };
+        hotkey = new HotkeyService();
+        hotkey.Triggered += async () => { try { await ToggleAsync(); } catch (Exception e) { Recover("shortcut", e); } };
+        // The shortcut's keyboard hook is re-armed after an unlock or a resume, when Windows is most likely to have dropped it.
+        SystemEvents.SessionSwitch += OnSessionSwitch;
+        SystemEvents.PowerModeChanged += OnPowerModeChanged;
+        try { panel = new RecordingPanel(); panel.Prepare(); }
+        catch (Exception e)
+        {
+            // A panel fault leaves dictation working without the panel rather than ending Sona.
+            Log("panel", e);
+            try { panel?.Close(); } catch { }
+            panel = null;
+        }
+        // Like the Mac, the panel follows the 48 voice bands, only while dictating.
+        recorder.Spectrum += bands => Dispatcher.BeginInvoke(() => { if (recording) panel?.SetSpectrum(bands); });
+        recorder.UnexpectedStop += e => Dispatcher.BeginInvoke(async () =>
+        {
+            try { await CancelAsync(); Notify("The microphone stopped. Check your selected device and Windows microphone access."); }
+            catch (Exception error) { Recover("microphone", error); }
+        });
+        limit.Tick += async (_, _) =>
+        {
+            try { limit.Stop(); if (recording) await FinishAsync(); }
+            catch (Exception e) { Recover("limit", e); }
+        };
         startCue = LoadCue("start.wav"); stopCue = LoadCue("stop.wav");
         if (!settings.SetupComplete) { OpenSettings(); return; }
         try
@@ -170,42 +208,54 @@ internal sealed class App : Application
         if (recording) { await FinishAsync(); return; }
         if (busy) return;
         if (!ready) { OpenSettings(); return; }
-        StopLearning(); correction = null;
+        StopLearning(); correction = null; sessionFailure = null;
         busy = true;
         try
         {
             operation = new CancellationTokenSource();
-            target = await TextInsertion.CaptureAsync();
+            var capture = await TextInsertion.CaptureWithStatusAsync();
+            target = capture.Target;
             if (operation.IsCancellationRequested) { Reset(); return; }
-            if (target == null) { Reset(); Notify("Place the cursor in an editable, non-password text field, then tap your shortcut."); return; }
+            if (target == null)
+            {
+                Reset();
+                Notify(TextInsertion.NotAnswering(capture.Status)
+                    ? "That app is not answering Sona yet. Try again in a moment."
+                    : "Place the cursor in an editable, non-password text field, then tap your shortcut.");
+                return;
+            }
             recorder.Start(settings.MicrophoneId); recording = true; if (tray != null) tray.Icon = activeIcon;
-            panel!.Recording(target.Window, HotkeyService.Label(settings.Shortcut));
+            var window = target.Window;
+            ShowPanel(() => panel?.Recording(window));
             try { startCue?.Play(); } catch { }
             limit.Interval = TimeSpan.FromSeconds(settings.MaximumRecordingSeconds); limit.Start();
-            tray!.Text = "Sona: recording";
+            if (tray != null) tray.Text = "Sona: recording";
         }
-        catch { Reset(); Notify("Sona could not start this recording. Check the microphone and saved configuration. No text was changed."); }
+        // Shown in the panel, like the Mac.
+        catch { sessionFailure = "The microphone is unavailable or switching. Try again."; Reset(); }
     }
     private async Task FinishAsync()
     {
         if (!recording) return;
-        recording = false; limit.Stop(); panel!.Processing(); tray!.Text = "Sona: processing";
+        recording = false; limit.Stop();
         try
         {
+            ShowPanel(() => panel?.Processing()); if (tray != null) tray.Text = "Sona: processing";
             var audio = await recorder.StopAsync();
             try { stopCue?.Play(); } catch { }
             bool audible = recorder.HasSpeech; recorder.Dispose();
-            if (!audible || audio.Length < 4000) { Notify("No speech was detected. Try speaking a little closer to the microphone."); return; }
+            if (!audible || audio.Length < 4000) { sessionFailure = "No speech was detected."; return; }
             operation!.CancelAfter(TimeSpan.FromSeconds(120));
             var text = await transcriber.TranscribeAsync(audio, ModelPath, settings.Language, operation.Token);
-            if (string.IsNullOrWhiteSpace(text)) { Notify("No speech was detected."); return; }
+            if (string.IsNullOrWhiteSpace(text)) { sessionFailure = "No speech was detected."; return; }
             // Snippets run inside the bridge before optional cleanup, including when cleanup is off.
             string raw = text;
             text = BridgeProtocol.DictationText(await RequestAsync(BridgeProtocol.Dictate(raw, settings.CleanupEnabled), operation.Token), raw);
             operation.Token.ThrowIfCancellationRequested(); latest = text;
             if (target != null) selectionSession = await UiaSession.PrepareCorrectionAsync(settings.AutoAddToDictionary, target);
             bool pasted = target != null && await TextInsertion.PasteAsync(target, text);
-            if (!pasted) Notify("Dictation is ready. Focus changed or this field blocked safe pasting. Use Copy last dictation in the Sona tray menu.");
+            // The Mac shows this one in the panel ("Text is ready in Copy pending text."), not as a notification.
+            if (!pasted) sessionFailure = "Text is ready in Copy last dictation.";
             else if (settings.AutoAddToDictionary && selectionSession != null && await selectionSession.ArmAsync(text))
             {
                 learningSession = selectionSession; selectionSession = null;
@@ -216,10 +266,11 @@ internal sealed class App : Application
         catch (OperationCanceledException) { if (!quitting) Notify("Dictation cancelled."); }
         catch (Exception e)
         {
-            string message = e is DllNotFoundException or TypeInitializationException
-                ? "The local speech runtime could not load. Run the Sona installer to repair its Microsoft Visual C++ dependency."
-                : "Dictation could not finish. Check your microphone and retry. No text was inserted.";
-            Notify(message);
+            // Whisper.net caches a failed native load for the life of the process, so a repair needs a restart
+            // too. That one needs action and stays a notification; the rest show in the panel, like the Mac.
+            if (SpeechRuntimeFailed(e))
+                Notify("The local speech runtime could not load. Run the Sona installer to repair its Microsoft Visual C++ dependency, then restart Sona.");
+            else sessionFailure = "Dictation could not finish. Try again.";
         }
         finally { Reset(); }
     }
@@ -234,11 +285,87 @@ internal sealed class App : Application
             Reset();
         }
     }
+    private static bool SpeechRuntimeFailed(Exception e) =>
+        e is DllNotFoundException or TypeInitializationException ||
+        e.Message.StartsWith("Failed to load native whisper library", StringComparison.Ordinal) ||
+        e is FileNotFoundException && e.Message.StartsWith("Native Library not found", StringComparison.Ordinal);
     private void Reset()
     {
-        selectionSession?.Dispose(); selectionSession = null;
-        limit.Stop(); recorder.Dispose(); panel?.Dismiss(); recording = false; busy = false; target = null;
-        operation?.Dispose(); operation = null; if (tray != null) { tray.Text = "Sona"; tray.Icon = idleIcon; }
+        // Flags first, and every step guarded, so no fault below can leave a session half open.
+        recording = false; busy = false;
+        string? failure = sessionFailure; sessionFailure = null;
+        var session = selectionSession; selectionSession = null; target = null;
+        Guard(() => session?.Dispose());
+        Guard(limit.Stop);
+        Guard(recorder.Dispose);
+        if (failure != null && !quitting)
+        {
+            try { if (panel != null) panel.ShowError(failure); else Notify(failure); }
+            catch (Exception e) { Log("reset", e); Guard(() => Notify(failure)); }
+        }
+        else Guard(() => panel?.Dismiss());
+        var done = operation; operation = null;
+        Guard(() => done?.Dispose());
+        Guard(() => { if (tray != null) { tray.Text = "Sona"; tray.Icon = idleIcon; } });
+        Guard(() => hotkey?.Rearm());
+    }
+    // The panel is feedback only: a fault in it is logged and the panel hidden, and the dictation goes on.
+    private void ShowPanel(Action show)
+    {
+        try { show(); }
+        catch (Exception e) { Log("panel", e); Guard(() => panel?.HideNow()); }
+    }
+    private void Guard(Action step)
+    {
+        try { step(); } catch (Exception e) { Log("reset", e); }
+    }
+    // The dictation path itself threw and has unwound: release the microphone, hide the panel and
+    // return to ready, the state that used to need a quit and reopen.
+    private void Recover(string where, Exception error)
+    {
+        Log(where, error);
+        Guard(() => operation?.Cancel());
+        Reset();
+        Guard(() => panel?.HideNow());
+    }
+    private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
+    {
+        Log("dispatcher", e.Exception);
+        if (tray == null) return; // Startup failed before the tray existed: end as before rather than run invisibly.
+        e.Handled = true;
+        // Usually the panel (its frame handler would throw every frame); dictation code recovers on its own path.
+        Guard(() => panel?.HideNow());
+    }
+    private void OnSessionSwitch(object? sender, SessionSwitchEventArgs e)
+    {
+        if (e.Reason == SessionSwitchReason.SessionUnlock) hotkey?.Rearm();
+    }
+    private void OnPowerModeChanged(object? sender, PowerModeChangedEventArgs e)
+    {
+        if (e.Mode == PowerModes.Resume) hotkey?.Rearm();
+    }
+    private static readonly object LogGate = new();
+    private static int logEntries;
+    /// %LOCALAPPDATA%\Sona\sona.log: where and the exception types and stacks. Never messages, dictated or clipboard text.
+    internal static void Log(string where, Exception error)
+    {
+        try
+        {
+            if (Interlocked.Increment(ref logEntries) > 200) return;
+            var entry = new System.Text.StringBuilder();
+            entry.Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture)).Append(' ').AppendLine(where);
+            for (Exception? e = error; e != null; e = e.InnerException)
+                entry.Append("  ").Append(e.GetType().FullName).Append(" 0x").AppendLine(e.HResult.ToString("X8", System.Globalization.CultureInfo.InvariantCulture)).AppendLine(e.StackTrace);
+            string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Sona");
+            lock (LogGate)
+            {
+                Directory.CreateDirectory(folder);
+                string path = Path.Combine(folder, "sona.log");
+                if (File.Exists(path) && new FileInfo(path).Length > 512 * 1024) File.Move(path, path + ".old", true);
+                File.AppendAllText(path, entry.ToString());
+            }
+        }
+        catch { }
     }
     private void Notify(string message)
     {
@@ -300,6 +427,7 @@ internal sealed class App : Application
     private async Task QuitAsync()
     {
         quitting = true; hotkey?.Disable(); await CancelAsync();
+        SystemEvents.SessionSwitch -= OnSessionSwitch; SystemEvents.PowerModeChanged -= OnPowerModeChanged;
         // Native inference receives cancellation. Do not dispose its factory while a call is active.
         if (!busy) transcriber.Dispose();
         panel?.Close(); tray?.Dispose(); idleIcon?.Dispose(); activeIcon?.Dispose(); startCue?.Dispose(); stopCue?.Dispose(); hotkey?.Dispose(); http.Dispose(); instance?.Dispose();

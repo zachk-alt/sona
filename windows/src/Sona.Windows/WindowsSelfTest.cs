@@ -28,8 +28,9 @@ internal static class WindowsSelfTest
             long style = Native.GetWindowLongPtr(handle, Native.GwlExStyle).ToInt64();
             Check("nonactivating_style", (style & Native.WsExNoActivate) != 0);
             Check("toolwindow_style", (style & Native.WsExToolWindow) != 0);
+            Check("click_through_style", (style & Native.WsExTransparent) != 0);
             Check("hidden_from_taskbar", !panel.ShowInTaskbar && !panel.ShowActivated);
-            Check("compact_recording_size", panel.Width == 340 && panel.Height == 142);
+            Check("compact_recording_size", panel.Width == RecordingPanel.PanelWidth && panel.Height == RecordingPanel.PanelHeight && panel.AllowsTransparency);
             using (var activeIcon = TrayIcons.Active()) Check("shared_blue_active_icon", activeIcon.Width > 0 && activeIcon.Height > 0);
             panel.Close();
             string bridge = Path.Combine(AppContext.BaseDirectory, "bridge", "sona-cleanup.mjs");
@@ -115,12 +116,12 @@ internal static class WindowsSelfTest
             checks["owned_capture_statuses"] = captureStatuses;
             checks["owned_capture_elapsed_ms"] = captureWatch.ElapsedMilliseconds;
             Check("capture_owned_editable_field", first != null);
-            panel.Recording(handle, "Ctrl + Alt + F10"); await Task.Delay(150);
+            panel.Recording(handle); await Task.Delay(150);
             Check("overlay_preserves_foreground_recording", Native.GetForegroundWindow() == handle);
             panel.Processing(); await Task.Delay(150);
             Check("overlay_preserves_foreground_processing", Native.GetForegroundWindow() == handle);
             panel.Dismiss();
-            panel.Processing("Thinking", handle); await Task.Delay(100);
+            panel.Processing(handle); await Task.Delay(100);
             Check("compact_processing_reshows_noactivate", panel.IsVisible && Native.GetForegroundWindow() == handle);
             panel.Dismiss();
             using (var hotkey = new HotkeyService(allowSyntheticForTests: true))
@@ -248,7 +249,7 @@ internal static class WindowsSelfTest
         finally
         {
             if (touchedClipboard) { try { if (oldClipboard != null) Clipboard.SetDataObject(oldClipboard, true); else Clipboard.Clear(); } catch { } }
-            panel.Dismiss(); panel.Close(); window.Close();
+            panel.HideNow(); panel.Close(); window.Close();
         }
     }
 }

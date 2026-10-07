@@ -22,11 +22,24 @@ internal sealed class Transcriber : IDisposable
         using var wave = new MemoryStream();
         WaveFileWriter.WriteWavFileToStream(wave, audio.ToWaveProvider16());
         wave.Position = 0;
-        using var processor = factory.CreateBuilder().WithLanguage(language).WithNoContext()
+        var processor = factory.CreateBuilder().WithLanguage(language).WithNoContext()
             .WithThreads(Math.Max(1, Math.Min(Environment.ProcessorCount - 1, 6))).Build();
-        var text = new StringBuilder();
-        await foreach (var segment in processor.ProcessAsync(wave, cancellation)) text.Append(segment.Text);
-        return text.ToString().Trim();
+        try
+        {
+            var text = new StringBuilder();
+            await foreach (var segment in processor.ProcessAsync(wave, cancellation)) text.Append(segment.Text);
+            return text.ToString().Trim();
+        }
+        catch (Exception) when (cancellation.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(cancellation); // A cancelled run reports a cancellation, not a failure.
+        }
+        finally
+        {
+            // A cancelled run can still hold the processor until the native abort lands. The synchronous
+            // Dispose throws in that window, so dispose asynchronously and stop waiting after 5 s.
+            try { await processor.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)); } catch { }
+        }
     }, cancellation);
     public void Dispose() { factory?.Dispose(); factory = null; }
 }

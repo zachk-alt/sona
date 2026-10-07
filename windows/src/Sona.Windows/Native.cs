@@ -4,7 +4,7 @@ namespace Sona.Windows;
 
 internal static class Native
 {
-    public const int GwlExStyle = -20, WsExNoActivate = 0x08000000, WsExToolWindow = 0x80;
+    public const int GwlExStyle = -20, WsExNoActivate = 0x08000000, WsExToolWindow = 0x80, WsExTransparent = 0x20;
     public const int WhMouseLl = 14;
     public const int WhKeyboardLl = 13, WmKeydown = 0x100, WmKeyup = 0x101, WmSyskeydown = 0x104, WmSyskeyup = 0x105, WmHotkey = 0x312;
     [DllImport("user32.dll")] public static extern nint GetKeyboardLayout(uint thread);

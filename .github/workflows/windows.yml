@@ -51,6 +51,24 @@ jobs:
             [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
             if ($errors.Count) { throw ($errors | Out-String) }
           }
+      - name: Recording panel preview renders
+        # After the self-test, so a preview failure cannot skip it, and run even if it failed so the renders still land.
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $panel = Join-Path $env:GITHUB_WORKSPACE 'artifacts/qa/panel'
+          New-Item -ItemType Directory -Path $panel -Force | Out-Null
+          $installed = Join-Path $env:LOCALAPPDATA 'Programs/Sona/Sona.exe'
+          $process = Start-Process -FilePath $installed -ArgumentList '--panel-preview', "`"$panel`"" -PassThru
+          if (-not $process.WaitForExit(120000)) { Stop-Process -Id $process.Id; throw 'Panel preview exceeded two minutes.' }
+          $failure = Join-Path $panel 'panel-preview-error.txt'
+          if (Test-Path $failure) { Get-Content $failure }
+          if ($process.ExitCode -ne 0) { throw "Panel preview failed: $($process.ExitCode)" }
+          foreach ($name in 'recording-dark', 'recording-light', 'processing-dark', 'processing-light') {
+            $png = Join-Path $panel "$name.png"
+            if (-not (Test-Path $png)) { throw "Panel preview did not write $name.png" }
+            Write-Host "$name.png $((Get-Item $png).Length) bytes"
+          }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -60,4 +78,5 @@ jobs:
             artifacts/SHA256SUMS.txt
             artifacts/install-windows.ps1
             artifacts/qa/windows-selftest.json
+            artifacts/qa/panel/*.png
           if-no-files-found: warn
