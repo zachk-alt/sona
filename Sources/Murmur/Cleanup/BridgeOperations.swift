@@ -48,6 +48,16 @@ struct BridgeResult: Decodable {
         return status == "ok" ? (text ?? raw) : raw
     }
     static func failed(_ operation: String) -> Self { .init(version:1,operation:operation,status:"error",text:nil,snippets:nil,reason:"unavailable") }
+    /// Fixed cleanup guard codes from bridge/cleanup-guard.mjs pass through
+    /// exactly; any other reason maps to a generic category. Never free text.
+    static let cleanupGuardCodes: Set<String> = [
+        "cleanup_guard_profanity", "cleanup_guard_dropped_words", "cleanup_guard_new_words",
+        "cleanup_guard_changed_words", "cleanup_guard_kept_words",
+    ]
+    var cleanupReasonCode: String? {
+        guard let reason else { return nil }
+        return Self.cleanupGuardCodes.contains(reason) ? reason : assistantFailureCode
+    }
     // Only fixed categories enter diagnostics. Provider text and unknown reason
     // strings must never become a local transcript or credential log.
     var assistantFailureCode: String {

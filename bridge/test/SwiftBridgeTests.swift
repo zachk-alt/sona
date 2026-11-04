@@ -5,41 +5,47 @@ struct SwiftBridgeTests {
     static func main() async throws {
         let arguments = CommandLine.arguments
         guard arguments.count == 3 else { fatalError("node path and fixture path required") }
+        let nodePath = arguments[1], bridgePath = arguments[2]
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("sona-swift-test-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        func service(_ scenario: String) throws -> BridgeCleanupService {
+        // The same argv shape the app uses: bridge script, config path and mode only.
+        // The transcript travels on stdin; the fixture exits 2 if it appears in argv.
+        func run(_ scenario: String, _ input: String, mode: String = "prose", node: String? = nil) throws -> CleanupBridgeRun {
             let config = directory.appendingPathComponent("\(scenario).json")
             try JSONSerialization.data(withJSONObject: ["scenario": scenario]).write(to: config)
-            return BridgeCleanupService(configPath: config.path, bridgePath: arguments[2], nodePath: arguments[1], timeout: 1)
+            return CleanupBridgeRun(nodePath: node ?? nodePath, arguments: [bridgePath, "--config", config.path,
+                "--mode", mode], input: input, timeout: 1)
+        }
+        func perform(_ run: CleanupBridgeRun) async -> String {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async { continuation.resume(returning: run.perform()) }
+            }
         }
         let raw = "um hello world"
-        let success = try service("success")
-        let cleaned = try await success.clean(raw, mode: .prose)
+        let cleaned = await perform(try run("success", raw))
         precondition(cleaned == "Hello, world.")
         for scenario in ["early-close", "empty", "nonzero", "overflow", "hang", "result-then-hang", "never-read"] {
             let start = ProcessInfo.processInfo.systemUptime
-            let instance = try service(scenario)
             let original = scenario == "never-read" ? String(repeating: "a", count: 63 * 1024) : raw
-            let result = try await instance.clean(original, mode: .strict)
+            let result = await perform(try run(scenario, original, mode: "strict"))
             precondition(result == original, "Failure did not preserve raw text: \(scenario)")
             precondition(ProcessInfo.processInfo.systemUptime - start < 2, "Unbounded: \(scenario)")
         }
-        let missing = BridgeCleanupService(configPath: "unused", bridgePath: arguments[2], nodePath: "/missing/sona-node")
-        let missingResult = try await missing.clean(raw, mode: .prose)
+        let missingResult = await perform(try run("success", raw, node: "/missing/sona-node"))
         precondition(missingResult == raw)
-        let cancelled = try service("hang")
-        let task = Task { try await cancelled.clean(raw, mode: .prose) }
+        let cancelled = try run("hang", raw)
+        let cancelStart = ProcessInfo.processInfo.systemUptime
+        let task = Task { await perform(cancelled) }
         try await Task.sleep(nanoseconds: 50_000_000)
-        task.cancel()
-        let cancelledResult = try await task.value
+        cancelled.cancel()
+        let cancelledResult = await task.value
         precondition(cancelledResult == raw)
-        let shutDown = try service("hang")
-        let active = Task { try await shutDown.clean(raw, mode: .prose) }
-        try await Task.sleep(nanoseconds: 50_000_000)
-        shutDown.shutdown()
-        let stoppedResult = try await active.value
-        precondition(stoppedResult == raw)
+        precondition(ProcessInfo.processInfo.systemUptime - cancelStart < 0.9, "Cancel waited for the deadline")
+        let early = try run("success", raw)
+        early.cancel()
+        let earlyResult = await perform(early)
+        precondition(earlyResult == raw, "A run cancelled before it starts must not launch")
         print("PASS: 11 exact-source Swift bridge lifecycle cases, no real models or UI")
     }
 }
