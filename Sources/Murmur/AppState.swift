@@ -92,6 +92,10 @@ final class AppState {
     private var recordingShown = false
     private var warmup: Task<Void, Never>?
     private var sessionMode: CleanupMode = .prose
+    /// Text-free session numbers for the M6 metrics line.
+    private var sessionPressedAt: Double?
+    private var sessionFirstAudio: (at: TimeInterval, dbfs: Double)?
+    private var sessionHoldSeconds: Double?
 
     init(config: Config = Config.load(),
          makeTranscriber: @escaping () -> Transcriber = { AppleTranscriber() },
@@ -203,6 +207,7 @@ final class AppState {
         // discoverable, preserving whatever the user set.
         if let error = config.save() { Log.write("config: settings could not be saved"); statusBar.showError(error) }
         Log.write("config: \(config.vocabulary.count) vocabulary terms, sound=\(config.sound ?? "default")")
+        DebugTextLog(until: config.debugTextLogUntil).housekeep()
 
         statusBar.setBackend(backendLabel)
         statusBar.setHotkey(config.hotkey)
@@ -289,6 +294,7 @@ final class AppState {
             return phase == .armed || phase == .recording
         case .commit, .unlatch:
             Log.write("hotkey: \(event)")
+            if phase == .armed || phase == .recording { sessionHoldSeconds = timing.heldSeconds }
             finishRecording()
             return true
         case .discard:
@@ -309,6 +315,7 @@ final class AppState {
 
         corrections.stop(); correctionSuggestion = nil; statusBar.setCorrectionAvailable(false)
         sessionFailure = nil; observationBaseline = nil
+        sessionPressedAt = pressed; sessionFirstAudio = nil; sessionHoldSeconds = nil
 
         // Nothing typeable under the cursor means the user wants Command for
         // something else. Decline the press outright: no sound, no mic, no
@@ -367,6 +374,7 @@ final class AppState {
     private func firstAudioArrived(_ id: Int, at time: TimeInterval, dbfs: Double) {
         guard sessionID == id, phase == .recording, !startCuePlayed else { return }
         startCuePlayed = true
+        sessionFirstAudio = (time, dbfs)
         firstAudioFallback?.cancel()
         firstAudioFallback = nil
         cue.start()
@@ -606,6 +614,8 @@ final class AppState {
         disarm()
         Log.write("insert: \(method.rawValue) (\(text.count) chars)")
         if let reason = TextInserter.lastPendingReason { Log.write("insert blocked: \(reason.diagnosticCode)") }
+        // After the paste, so file work never delays the text.
+        recordSession(raw: raw, result: result)
         if method == .pending {
             sessionFailure = "Text is ready in Copy pending text."
         }
@@ -616,6 +626,26 @@ final class AppState {
             }
             try? await Task.sleep(for:.milliseconds(200))
         }
+    }
+
+    /// M6 metrics line (numbers and fixed codes only) and, when the private
+    /// config turned it on, the M7 debug text line in its own folder.
+    private func recordSession(raw: String, result: BridgeResult) {
+        let cleaned = result.status == "ok" ? result.text : nil
+        let reason = result.cleanupReasonCode
+        let firstAudioMs = sessionFirstAudio.flatMap { first in
+            sessionPressedAt.map { Int(((first.at - $0) * 1000).rounded()) }
+        }
+        let device = try? catchingFrameworkException { AVCaptureDevice.default(for: .audio)?.localizedName }
+        Log.write(SessionMetrics.line(
+            keyToFirstAudioMs: firstAudioMs, firstAudioDbfs: sessionFirstAudio?.dbfs,
+            inputDevice: device ?? nil, holdMs: sessionHoldSeconds.map { Int(($0 * 1000).rounded()) },
+            cleanupStatus: result.status, reason: reason,
+            changedPercent: SessionMetrics.changedPercent(raw: raw, cleaned: cleaned)))
+        // Fresh from disk, not self.config: removing the entry by hand must
+        // stop the very next write without a relaunch.
+        DebugTextLog.fromConfigFile()
+            .record(engineText: raw, cleanedText: cleaned, cleanupStatus: result.status, reason: reason)
     }
 
     /// A session its deadline abandoned can still finish. Its words go to Copy

@@ -129,11 +129,166 @@ func testCaptureConverter() {
     }
 }
 
+
+// MARK: - Debug text log (M7) and session metrics (M6)
+
+func mode(_ path: String) -> Int {
+    ((try? FileManager.default.attributesOfItem(atPath: path))?[.posixPermissions] as? NSNumber)?.intValue ?? -1
+}
+
+func testDebugTextLog() {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("sona-debug-text-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: root) }
+    let folder = root.appendingPathComponent("debug-text")
+    let start = Date(timeIntervalSince1970: 1_800_000_000)
+    var clock = start
+    let until = start.addingTimeInterval(7 * 24 * 3600)
+
+    // Off by default: no setting means no folder and no file.
+    do {
+        let log = DebugTextLog(until: nil, folder: folder, now: { clock })
+        log.housekeep()
+        log.record(engineText: "alpha", cleanedText: "Alpha.", cleanupStatus: "ok", reason: nil)
+        check(!fm.fileExists(atPath: folder.path), "Off by default writes nothing and creates no folder")
+    }
+
+    // On: folder 0700 and file 0600, one JSON line per dictation.
+    let on = DebugTextLog(until: until, folder: folder, now: { clock })
+    on.record(engineText: "hello world", cleanedText: "Hello, world.", cleanupStatus: "ok", reason: nil)
+    on.record(engineText: "second one", cleanedText: nil, cleanupStatus: "fallback", reason: "cleanup_guard_new_words")
+    let today = on.fileURL(for: clock)
+    check(mode(folder.path) == 0o700, "Debug folder is 0700 (got \(String(mode(folder.path), radix: 8)))")
+    check(mode(today.path) == 0o600, "Debug file is 0600 (got \(String(mode(today.path), radix: 8)))")
+    let lines = ((try? String(contentsOf: today, encoding: .utf8)) ?? "").split(separator: "\n")
+    check(lines.count == 2, "One line per dictation (\(lines.count))")
+    if lines.count == 2,
+       let first = try? JSONSerialization.jsonObject(with: Data(lines[0].utf8)) as? [String: Any],
+       let second = try? JSONSerialization.jsonObject(with: Data(lines[1].utf8)) as? [String: Any] {
+        check(first["engineText"] as? String == "hello world" && first["cleanedText"] as? String == "Hello, world.",
+              "The line holds the engine and cleaned text")
+        check(first["cleanupStatus"] as? String == "ok" && first["reason"] is NSNull && first["time"] is String,
+              "Status, null reason and time are present")
+        check(second["cleanedText"] is NSNull && second["reason"] as? String == "cleanup_guard_new_words",
+              "No cleaned text is null; the guard code is kept exactly")
+    } else {
+        check(false, "Debug lines are JSON objects")
+    }
+
+    // Prune: a file from more than seven days ago goes, a recent one stays.
+    let old = folder.appendingPathComponent("2020-01-01.jsonl")
+    let recent = on.fileURL(for: clock.addingTimeInterval(-3 * 24 * 3600))
+    fm.createFile(atPath: old.path, contents: Data("{}\n".utf8))
+    fm.createFile(atPath: recent.path, contents: Data("{}\n".utf8))
+    on.housekeep()
+    check(!fm.fileExists(atPath: old.path), "Files older than seven days are pruned")
+    check(fm.fileExists(atPath: recent.path) && fm.fileExists(atPath: today.path), "Files inside seven days are kept")
+    fm.createFile(atPath: old.path, contents: Data("{}\n".utf8))
+    on.record(engineText: "third", cleanedText: "Third.", cleanupStatus: "ok", reason: nil)
+    check(!fm.fileExists(atPath: old.path), "Each write prunes old files first")
+
+    // After until: everything is deleted and nothing more is written.
+    clock = until.addingTimeInterval(1)
+    on.housekeep()
+    let left = (try? fm.contentsOfDirectory(atPath: folder.path)) ?? []
+    check(left.isEmpty, "Once until has passed every file is deleted (\(left))")
+    on.record(engineText: "late", cleanedText: "Late.", cleanupStatus: "ok", reason: nil)
+    let after = (try? fm.contentsOfDirectory(atPath: folder.path)) ?? []
+    check(after.isEmpty, "Nothing is written after until (\(after))")
+    check(!on.isOn, "The log reports off after until")
+}
+
+func testDebugTextLogConfig() {
+    func decode(_ json: String) -> Config? { try? JSONDecoder().decode(Config.self, from: Data(json.utf8)) }
+    let without = decode(#"{"hotkey":"right-command","vocabulary":["Sona"]}"#)
+    check(without != nil && without?.debugTextLogUntil == nil, "No key decodes, off")
+    let with = decode(#"{"vocabulary":["Sona"],"debugTextLog":{"until":"2026-11-11T17:00:00-05:00"}}"#)
+    check(with?.debugTextLogUntil == ISO8601DateFormatter().date(from: "2026-11-11T22:00:00Z"), "A valid until decodes")
+    check(with?.vocabulary == ["Sona"], "The rest of the config still decodes")
+    for bad in [#"{"debugTextLog":{"until":"next week"}}"#, #"{"debugTextLog":true}"#,
+                #"{"debugTextLog":{"until":42}}"#, #"{"debugTextLog":{}}"#, #"{"debugTextLog":null}"#] {
+        let config = decode(#"{"vocabulary":["Sona"],"# + bad.dropFirst())
+        check(config != nil && config?.debugTextLogUntil == nil && config?.vocabulary == ["Sona"],
+              "A malformed value is off and never fails the file: \(bad)")
+    }
+    check(Config().debugTextLogUntil == nil, "A new config is off")
+}
+
+/// The app records through DebugTextLog.fromConfigFile, which reads the file
+/// at each write. A hand edit that removes the entry, with Sona still running,
+/// must purge the folder and stop the very next record.
+func testDebugTextLogReadsConfigEachWrite() {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("sona-debug-config-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: root) }
+    try? fm.createDirectory(at: root, withIntermediateDirectories: true)
+    let configURL = root.appendingPathComponent("config.json")
+    let folder = root.appendingPathComponent("debug-text")
+    let clock = ISO8601DateFormatter().date(from: "2026-11-05T15:00:00Z")!
+    func writeConfig(_ json: String) { try? Data(json.utf8).write(to: configURL) }
+    func record(_ text: String) {
+        DebugTextLog.fromConfigFile(configURL, folder: folder, now: { clock })
+            .record(engineText: text, cleanedText: text, cleanupStatus: "ok", reason: nil)
+    }
+    func contents() -> [String] { (try? fm.contentsOfDirectory(atPath: folder.path)) ?? [] }
+
+    writeConfig(#"{"vocabulary":["Sona"],"debugTextLog":{"until":"2026-11-11T17:00:00-05:00"}}"#)
+    record("while on")
+    check(contents().count == 1, "With the entry on disk, a record writes (\(contents()))")
+
+    // Removed by hand while running: the next record purges and writes nothing.
+    writeConfig(#"{"vocabulary":["Sona"]}"#)
+    record("after removal")
+    check(contents().isEmpty, "A removed entry stops the next record and purges the folder (\(contents()))")
+
+    // Turned back on, then the file goes missing or malformed: both read as off.
+    writeConfig(#"{"vocabulary":["Sona"],"debugTextLog":{"until":"2026-11-11T17:00:00-05:00"}}"#)
+    record("on again")
+    check(contents().count == 1, "Restoring the entry turns it back on (\(contents()))")
+    writeConfig("{ not json")
+    record("malformed")
+    check(contents().isEmpty, "A malformed config file reads as off (\(contents()))")
+    writeConfig(#"{"vocabulary":["Sona"],"debugTextLog":{"until":"2026-11-11T17:00:00-05:00"}}"#)
+    record("on once more")
+    try? fm.removeItem(at: configURL)
+    record("missing")
+    check(contents().isEmpty, "A missing config file reads as off (\(contents()))")
+}
+
+func testSessionMetrics() {
+    check(SessionMetrics.changedPercent(raw: "one two three four", cleaned: "one two three four") == 0, "No change is 0%")
+    check(SessionMetrics.changedPercent(raw: "one two three four", cleaned: "one too three four") == 25, "One word of four is 25%")
+    check(SessionMetrics.changedPercent(raw: "one two three four", cleaned: "one two three") == 25, "A dropped word counts")
+    check(SessionMetrics.changedPercent(raw: "one two", cleaned: "one two three four") == 100, "Added words count, capped at 100%")
+    check(SessionMetrics.changedPercent(raw: "one two three", cleaned: nil) == 0, "No cleaned text is 0%")
+    check(SessionMetrics.changedPercent(raw: "", cleaned: "") == 0, "Empty text is 0%")
+    check(SessionMetrics.wordEditDistance(["a", "b", "c"], ["a", "c", "d"]) == 2, "Word edit distance")
+
+    let sentence = "Please schedule the quarterly harbor inspection with Marguerite tomorrow"
+    let cleaned = "Please schedule the quarterly harbour inspection with Marguerite tomorrow."
+    let line = SessionMetrics.line(keyToFirstAudioMs: 182, firstAudioDbfs: -41.6, inputDevice: "MacBook Pro Microphone",
+                                   holdMs: 2440, cleanupStatus: "ok", reason: nil,
+                                   changedPercent: SessionMetrics.changedPercent(raw: sentence, cleaned: cleaned))
+    let lowered = line.lowercased()
+    for word in Set(SessionMetrics.words(sentence + " " + cleaned).map { $0.lowercased().trimmingCharacters(in: .punctuationCharacters) }) {
+        check(!lowered.contains(word), "The metrics line holds no transcript word: \(word)")
+    }
+    check(line.contains("firstAudioMs=182") && line.contains("firstAudioDbfs=-42") && line.contains("holdMs=2440")
+          && line.contains("wordsChanged=22%") && line.contains("reason=none"), "Metrics line fields: \(line)")
+    let missing = SessionMetrics.line(keyToFirstAudioMs: nil, firstAudioDbfs: nil, inputDevice: nil, holdMs: nil,
+                                      cleanupStatus: "fallback", reason: "cleanup_guard_dropped_words", changedPercent: 0)
+    check(missing.contains("firstAudioMs=none") && missing.contains("reason=cleanup_guard_dropped_words"), "Missing numbers read none")
+}
+
 @main
 struct DictationPipelineMain {
     static func main() {
         testTranscriptAssembler()
         testCaptureConverter()
+        testDebugTextLog()
+        testDebugTextLogConfig()
+        testDebugTextLogReadsConfigEachWrite()
+        testSessionMetrics()
         print("Dictation pipeline: \(checks) checks passed; no microphone, speech engine or window.")
     }
 }

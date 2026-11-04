@@ -57,6 +57,11 @@ struct Config: Codable {
     /// dry: "clean and full" means the fullness comes from the octaves in the
     /// sound itself, not from room.
     var cueReverb: Double = 0.0
+    /// End of the opt-in debug text log (DebugTextLog), from
+    /// "debugTextLog": {"until": "<ISO-8601>"}. Absent or malformed means off.
+    /// Not an app-owned key: save() never writes or removes it, so only a hand
+    /// edit turns it on or off.
+    var debugTextLogUntil: Date? = nil
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case hotkey, snippets, autoAddToDictionary, setupComplete, ai, vocabulary, strictModeBundleIDs, claudePath, cleanupEnabled,
@@ -85,6 +90,21 @@ struct Config: Codable {
         startSound = try c.decodeIfPresent(String.self, forKey: .startSound)
         stopSound = try c.decodeIfPresent(String.self, forKey: .stopSound)
         cueReverb = try c.decodeIfPresent(Double.self, forKey: .cueReverb) ?? d.cueReverb
+        // A malformed value never fails the whole file; it only stays off.
+        let debug = try? decoder.container(keyedBy: DebugKeys.self)
+        if let setting = try? debug?.decodeIfPresent(DebugTextLogSetting.self, forKey: .debugTextLog) {
+            debugTextLogUntil = Self.parseISO8601(setting.until)
+        }
+    }
+
+    private enum DebugKeys: String, CodingKey { case debugTextLog }
+    private struct DebugTextLogSetting: Decodable { let until: String }
+
+    static func parseISO8601(_ text: String) -> Date? {
+        let f = ISO8601DateFormatter()
+        if let date = f.date(from: text) { return date }
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f.date(from: text)
     }
 
     static var configURL: URL {
@@ -136,8 +156,8 @@ struct Config: Codable {
         } catch { return "Settings could not be saved. The previous file was retained." }
     }
 
-    static func load() -> Config {
-        guard let data = try? Data(contentsOf: configURL),
+    static func load(from url: URL = configURL) -> Config {
+        guard let data = try? Data(contentsOf: url),
               let config = try? JSONDecoder().decode(Config.self, from: data)
         else { return Config() }
         return config

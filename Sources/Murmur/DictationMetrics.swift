@@ -42,3 +42,49 @@ enum AudioLevel {
         return max(silence, 20 * log10(Double(rms)))
     }
 }
+
+/// M6: one text-free line per finished dictation. Only numbers, the input
+/// device name and fixed codes; never transcript or cleaned text.
+enum SessionMetrics {
+    /// Share of the engine's words that cleanup changed, as a whole percent,
+    /// from the word-level edit distance. 0 when cleanup returned nothing.
+    static func changedPercent(raw: String, cleaned: String?) -> Int {
+        guard let cleaned else { return 0 }
+        let a = words(raw), b = words(cleaned)
+        guard !a.isEmpty else { return b.isEmpty ? 0 : 100 }
+        let distance = wordEditDistance(a, b)
+        return Int((Double(min(distance, a.count)) / Double(a.count) * 100).rounded())
+    }
+
+    static func words(_ text: String) -> [Substring] {
+        text.split(whereSeparator: { $0.isWhitespace || $0.isNewline })
+    }
+
+    /// Levenshtein distance over words (insert, delete, substitute).
+    static func wordEditDistance(_ a: [Substring], _ b: [Substring]) -> Int {
+        if a.isEmpty { return b.count }
+        if b.isEmpty { return a.count }
+        var previous = Array(0...b.count)
+        var current = [Int](repeating: 0, count: b.count + 1)
+        for i in 1...a.count {
+            current[0] = i
+            for j in 1...b.count {
+                let cost = a[i - 1] == b[j - 1] ? 0 : 1
+                current[j] = min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost)
+            }
+            swap(&previous, &current)
+        }
+        return previous[b.count]
+    }
+
+    static func line(keyToFirstAudioMs: Int?, firstAudioDbfs: Double?, inputDevice: String?, holdMs: Int?,
+                     cleanupStatus: String, reason: String?, changedPercent: Int) -> String {
+        func number(_ v: Int?) -> String { v.map(String.init) ?? "none" }
+        let level = firstAudioDbfs.map { String(Int($0.rounded())) } ?? "none"
+        // A device name is a label, not text the user dictated. Quote it so
+        // spaces cannot shift the fields.
+        let device = inputDevice.map { "\"" + $0.replacingOccurrences(of: "\"", with: "'") + "\"" } ?? "none"
+        return "session: firstAudioMs=\(number(keyToFirstAudioMs)) firstAudioDbfs=\(level) device=\(device) " +
+            "holdMs=\(number(holdMs)) cleanup=\(cleanupStatus) reason=\(reason ?? "none") wordsChanged=\(changedPercent)%"
+    }
+}
