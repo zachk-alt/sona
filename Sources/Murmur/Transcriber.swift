@@ -72,7 +72,7 @@ final class AppleTranscriber: Transcriber {
             resolved = try await Self.resolveLocale(locale)
             resolvedLocale = resolved
         }
-        let new = SpeechTranscriber(locale: resolved, preset: .progressiveTranscription)
+        let new = SpeechTranscriber(locale: resolved, preset: .transcription)
 
         // A locale must be RESERVED before the analyzer will accept the module.
         // Without this, `start(inputSequence:)` fails with a bare `nilError`
