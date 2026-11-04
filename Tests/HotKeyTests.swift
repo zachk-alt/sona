@@ -90,6 +90,28 @@ final class HotKeyTests {
         router.reset()
         XCTAssertTrue(event(.flagsChanged,54,[],3.1).events.isEmpty)
     }
+    func testGestureTimingForDiagnostics() {
+        // The press time starts the mic delay; the hold time of the stop tap
+        // goes to the text-free session log.
+        let router = HotKeyRouter(binding:HotKeyBinding("right-command")!)
+        let command = CGEventFlags(rawValue:CGEventFlags.maskCommand.rawValue | 0x10)
+        let press = router.route(type:.flagsChanged,code:54,flags:command,time:10)
+        XCTAssertEqual(press.events,[.begin]); XCTAssertEqual(press.timing.pressedAt,10); XCTAssertNil(press.timing.heldSeconds)
+        let tap = router.route(type:.flagsChanged,code:54,flags:[],time:10.25)
+        XCTAssertEqual(tap.events,[.latch]); XCTAssertEqual(tap.timing.heldSeconds,0.25); XCTAssertNil(tap.timing.pressedAt)
+        let stopDown = router.route(type:.flagsChanged,code:54,flags:command,time:12)
+        XCTAssertTrue(stopDown.events.isEmpty); XCTAssertEqual(stopDown.timing,HotKeyTiming())
+        let stopUp = router.route(type:.flagsChanged,code:54,flags:[],time:12.125)
+        XCTAssertEqual(stopUp.events,[.unlatch]); XCTAssertEqual(stopUp.timing.heldSeconds,0.125)
+        _ = router.route(type:.flagsChanged,code:54,flags:command,time:20)
+        let release = router.route(type:.flagsChanged,code:54,flags:[],time:21.5)
+        XCTAssertEqual(release.events,[.commit]); XCTAssertEqual(release.timing.heldSeconds,1.5)
+        // A chord is not a dictation: no hold time is reported for it.
+        _ = router.route(type:.flagsChanged,code:54,flags:command,time:30)
+        _ = router.route(type:.keyDown,code:8,flags:command,time:30.05)
+        _ = router.route(type:.keyUp,code:8,flags:command,time:30.1)
+        XCTAssertNil(router.route(type:.flagsChanged,code:54,flags:[],time:30.2).timing.heldSeconds)
+    }
     func testRetiredSettingsCannotReactivateOption() throws {
         for extra in [
             #""commandHotkey":"right-option","assistant":{"provider":"codex","model":"chosen","effort":"high"}"#,
@@ -196,10 +218,11 @@ final class HotKeyTests {
         try tests.testLegacyConfigKeepsPreferencesAndDoesNotForceSetup()
         try tests.testNewPartialAIConfigPreservesEconomyDefaults()
         tests.testDefaultDictationRouter()
+        tests.testGestureTimingForDiagnostics()
         try tests.testRetiredSettingsCannotReactivateOption()
         tests.testOptionCharactersAndOrdinaryChordsPassThrough()
         tests.testOnlyChosenOptionSideCanBeTheDictationKey()
         tests.testChosenChordAndRepeatedKeys()
-        print("13 dictation-only hotkey, passthrough and configuration behavior groups passed.")
+        print("14 dictation-only hotkey, passthrough and configuration behavior groups passed.")
     }
 }

@@ -34,8 +34,11 @@ final class AppleTranscriber: Transcriber {
     /// the module.
     private var resolvedLocale: Locale?
     private var continuation: AsyncStream<AnalyzerInput>.Continuation?
-    private var collector: Task<String, Error>?
+    private var collector: Task<TranscriptAssembler, Error>?
     private var cachedFormat: AVAudioFormat?
+    /// Characters of the last finished session that the engine never marked
+    /// final. Zero on a normal session. Read by the bench, never logged as text.
+    private(set) var lastUnfinalizedCharacters = 0
 
     init(locale: Locale = Locale.current) {
         self.locale = locale
@@ -126,15 +129,18 @@ final class AppleTranscriber: Transcriber {
         let analyzer = SpeechAnalyzer(modules: [transcriber])
         self.analyzer = analyzer
 
-        // Drain results concurrently. The final value is whatever the last
-        // non-volatile result carries; earlier ones are provisional and get
-        // superseded, so only the accumulated finalized text is kept.
+        // Drain results concurrently. Volatile results are provisional and a
+        // later result over the same audio replaces them; text the engine
+        // never marks final is still kept (TranscriptAssembler).
         collector = Task {
-            var finalized = AttributedString()
-            for try await result in transcriber.results where result.isFinal {
-                finalized.append(result.text)
+            var assembler = TranscriptAssembler()
+            for try await result in transcriber.results {
+                assembler.add(text: String(result.text.characters),
+                              start: result.range.start.seconds, end: result.range.end.seconds,
+                              isFinal: result.isFinal,
+                              finalizedThrough: result.resultsFinalizationTime.seconds)
             }
-            return String(finalized.characters)
+            return assembler
         }
 
         try await analyzer.start(inputSequence: stream)
@@ -149,11 +155,16 @@ final class AppleTranscriber: Transcriber {
         continuation = nil
         try await analyzer?.finalizeAndFinishThroughEndOfInput()
 
-        let text = try await collector?.value ?? ""
+        let assembled = try await collector?.value ?? TranscriptAssembler()
         collector = nil
         analyzer = nil
         transcriber = nil
-        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        lastUnfinalizedCharacters = assembled.unfinalizedCharacters
+        if assembled.unfinalizedCharacters > 0 {
+            // A count only: transcript text never enters the diagnostics log.
+            Log.write("transcribe: kept \(assembled.unfinalizedCharacters) chars the engine never marked final")
+        }
+        return assembled.text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     func cancel() async {
@@ -172,5 +183,58 @@ final class AppleTranscriber: Transcriber {
     private static func bestFormat(_ formats: [AVAudioFormat]) -> AVAudioFormat? {
         if let sixteen = formats.first(where: { $0.sampleRate == 16000 }) { return sixteen }
         return formats.max(by: { $0.sampleRate < $1.sampleRate }) ?? formats.first
+    }
+}
+
+/// Joins one session's results into its text, in audio order.
+///
+/// A result is final or volatile. A newer result over the same audio replaces
+/// any volatile text there. Apple's engine is not required to reissue a
+/// volatile result as final when finalization leaves it unchanged
+/// (`resultsFinalizationTime` documentation), and DictationTranscriber's short
+/// dictation preset never marked anything final, so a final-only filter can
+/// drop words that were spoken. Text that was never final is therefore kept
+/// rather than dropped, and counted for diagnostics.
+struct TranscriptAssembler {
+    private struct Segment {
+        var start: Double
+        var end: Double
+        var text: String
+        /// Reported final, or finalized through by a later result.
+        var settled: Bool
+        /// Reported final by its own result. What the old filter kept.
+        var reportedFinal: Bool
+    }
+    private var segments: [Segment] = []
+
+    /// - Parameters:
+    ///   - start, end: the result's audio range in seconds.
+    ///   - finalizedThrough: the result's `resultsFinalizationTime` in seconds.
+    mutating func add(text: String, start: Double, end: Double, isFinal: Bool, finalizedThrough: Double) {
+        // Invalid times keep arrival order: the segment goes after the last one.
+        let tail = segments.last?.end ?? 0
+        let lower = start.isFinite ? start : tail
+        let upper = end.isFinite ? max(end, lower) : lower
+        // Superseded provisional text over the same audio goes first, so a
+        // final that replaces a volatile result never keeps both.
+        segments.removeAll { old in
+            !old.settled && ((old.start < upper && lower < old.end) || (old.start == lower && old.end == upper))
+        }
+        // Earlier results this one finalizes through can no longer change.
+        if finalizedThrough.isFinite {
+            for index in segments.indices where segments[index].end <= finalizedThrough {
+                segments[index].settled = true
+            }
+        }
+        let segment = Segment(start: lower, end: upper, text: text, settled: isFinal, reportedFinal: isFinal)
+        let index = segments.firstIndex { $0.start > lower } ?? segments.endIndex
+        segments.insert(segment, at: index)
+    }
+
+    var text: String { segments.map(\.text).joined() }
+
+    /// Characters kept that no result ever reported final.
+    var unfinalizedCharacters: Int {
+        segments.filter { !$0.reportedFinal }.reduce(0) { $0 + $1.text.trimmingCharacters(in: .whitespacesAndNewlines).count }
     }
 }

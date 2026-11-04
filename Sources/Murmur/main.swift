@@ -121,7 +121,7 @@ if arguments.contains("--doctor") {
 // with a bare run loop. Logs every right-Command event it sees for 8 seconds.
 if arguments.contains("--taptest") {
     Log.write("taptest: AX=\(AXIsProcessTrusted())")
-    let probe = HotKeyMonitor { event in Log.write("taptest: EVENT \(event)"); return true }
+    let probe = HotKeyMonitor { event, _ in Log.write("taptest: EVENT \(event)"); return true }
     Log.write("taptest: tapCreate=\(probe.start())")
     Thread.sleep(forTimeInterval: 8)
     Log.write("taptest: done")

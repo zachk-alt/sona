@@ -5,6 +5,15 @@ import CoreGraphics
 struct HotKeyRoute {
     var consumed = false
     var events: [HotKeyEvent] = []
+    var timing = HotKeyTiming()
+}
+/// When the physical key moved, in system uptime seconds. Timing only; no
+/// key history is kept.
+struct HotKeyTiming: Equatable {
+    /// The press that produced `.begin`.
+    var pressedAt: Double?
+    /// How long the key was down, on the release that latched or stopped.
+    var heldSeconds: Double?
 }
 final class HotKeyRouter {
     private let binding: HotKeyBinding
@@ -49,11 +58,12 @@ final class HotKeyRouter {
             guard !repeatKey, clean, previouslyHeld.subtracting([code]).isEmpty else { return output }
             pressedAt = time; invalid = false; stopping = latched
             if !binding.isModifier { output.consumed = true }
-            if !latched { output.events.append(.begin) }
+            if !latched { output.events.append(.begin); output.timing.pressedAt = time }
         } else if up, let start = pressedAt {
             if !binding.isModifier { output.consumed = true }
             pressedAt = nil
             guard !invalid else { stopping = false; return output }
+            output.timing.heldSeconds = max(0, time - start)
             if stopping {
                 stopping = false; latched = false
                 output.events.append(.unlatch)

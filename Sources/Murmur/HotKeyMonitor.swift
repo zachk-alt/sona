@@ -7,13 +7,13 @@ final class HotKeyMonitor {
     private let router: HotKeyRouter
     private let stateLock = NSLock()
     private var generation: UInt64 = 0
-    private let handler: (HotKeyEvent) -> Bool
+    private let handler: (HotKeyEvent, HotKeyTiming) -> Bool
     private(set) var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var tapThread: Thread?
     private var tapRunLoop: CFRunLoop?
 
-    init(binding: HotKeyBinding = HotKeyBinding("right-command")!, handler: @escaping (HotKeyEvent) -> Bool) {
+    init(binding: HotKeyBinding = HotKeyBinding("right-command")!, handler: @escaping (HotKeyEvent, HotKeyTiming) -> Bool) {
         router = HotKeyRouter(binding: binding, threshold: NSEvent.doubleClickInterval)
         self.handler = handler
     }
@@ -49,7 +49,7 @@ final class HotKeyMonitor {
                         let monitor = Unmanaged<HotKeyMonitor>.fromOpaque(refcon).takeUnretainedValue()
                         monitor.resetGesture()
                         DispatchQueue.main.async { [weak monitor] in
-                            _ = monitor?.handler(.discard)
+                            _ = monitor?.handler(.discard, HotKeyTiming())
                         }
                     }
                     if let refcon,
@@ -138,7 +138,7 @@ final class HotKeyMonitor {
                 for action in result.events {
                     self.stateLock.lock(); let current = self.generation == epoch; self.stateLock.unlock()
                     guard current else { return }
-                    if !self.handler(action) {
+                    if !self.handler(action, result.timing) {
                         self.stateLock.lock(); self.router.reset(); self.stateLock.unlock()
                         return
                     }

@@ -28,8 +28,10 @@ final class AppState {
     /// The microphone is opened this long after the key goes down, not
     /// instantly. Right-Command is also an ordinary modifier, so opening on
     /// every press would flash the orange recording indicator every time the
-    /// user hits Cmd-C. The start chord plays immediately and takes ~90 ms, so
-    /// by the time anyone begins speaking the mic is already live.
+    /// user hits Cmd-C. The delay runs from the physical press, so the focus
+    /// checks happen inside it instead of after it. The start chime and the
+    /// recording panel wait for the first audio buffer, so the chime means
+    /// the microphone is live.
     private static let micDelay: TimeInterval = 0.15
 
     /// Longest each stage may take before the session is abandoned. Normal
@@ -37,6 +39,17 @@ final class AppState {
     struct Deadlines {
         /// Key held to microphone open, including the first-launch speech warmup.
         var opening: TimeInterval = 10
+        /// Mic delay over to the first audio buffer. Past this the recording
+        /// panel shows anyway, without the start chime, so a slow microphone
+        /// (a Bluetooth headset switching profile) never leaves a press with
+        /// no feedback. The chime still waits for real audio. Normal opens
+        /// deliver audio in 210 to 360 ms.
+        var firstAudio: TimeInterval = 1.5
+        /// Audio still captured after the stop tap before the microphone
+        /// closes and the converter hands on its held-back tail (the audit
+        /// found 100 to 150 ms enough). The `transcribing` deadline, armed at
+        /// the stop tap, bounds this pause, the flush and the transcription.
+        var stopGrace: TimeInterval = 0.12
         /// Release to final transcript.
         var transcribing: TimeInterval = 15
         /// Transcript to inserted text: the bounded cleanup bridge plus insertion.
@@ -72,6 +85,11 @@ final class AppState {
     private var phase: Phase = .idle
     private var pendingMicStart: DispatchWorkItem?
     private var microphoneStart: Task<Bool, Never>?
+    /// Shows the recording panel if the first audio is late (Deadlines.firstAudio).
+    private var firstAudioFallback: DispatchWorkItem?
+    /// The start chime played: the microphone delivered audio this session.
+    private var startCuePlayed = false
+    private var recordingShown = false
     private var warmup: Task<Void, Never>?
     private var sessionMode: CleanupMode = .prose
 
@@ -114,8 +132,8 @@ final class AppState {
 
     private func makeMonitor() -> HotKeyMonitor? {
         guard let primary = HotKeyBinding(config.hotkey) else { return nil }
-        return HotKeyMonitor(binding:primary) { [weak self] event in
-            self?.handle(event) ?? false
+        return HotKeyMonitor(binding:primary) { [weak self] event, timing in
+            self?.handle(event, timing: timing) ?? false
         }
     }
     private func resumeHotkeys() {
@@ -261,10 +279,10 @@ final class AppState {
     // MARK: - Hotkey
 
     /// Returns false only for a gesture the app declines to act on.
-    func handle(_ event: HotKeyEvent) -> Bool {
+    func handle(_ event: HotKeyEvent, timing: HotKeyTiming = HotKeyTiming()) -> Bool {
         switch event {
         case .begin:
-            let accepted = beginRecording()
+            let accepted = beginRecording(pressedAt: timing.pressedAt)
             if accepted { Log.write("hotkey: \(event)") }
             return accepted
         case .latch:
@@ -281,9 +299,13 @@ final class AppState {
     }
 
     @discardableResult
-    private func beginRecording() -> Bool {
+    private func beginRecording(pressedAt pressTime: Double? = nil) -> Bool {
         if phase == .armed || phase == .recording { return true }
         guard phase == .idle else { return false }
+        // The mic delay counts from the physical press (the event tap's
+        // uptime), so the focus checks below run inside it.
+        let now = ProcessInfo.processInfo.systemUptime
+        let pressed = min(pressTime ?? now, now)
 
         corrections.stop(); correctionSuggestion = nil; statusBar.setCorrectionAvailable(false)
         sessionFailure = nil; observationBaseline = nil
@@ -311,32 +333,63 @@ final class AppState {
         sessionID &+= 1
         let id = sessionID
         phase = .armed
+        startCuePlayed = false
+        recordingShown = false
 
         // NOTHING user-visible happens until the delay elapses. Right Command
-        // is an ordinary modifier, so acting on the press itself would chirp
-        // the start chord and spawn a cleanup subprocess every time the user
-        // hit Cmd-C. Everything below is committed to only once the key is
-        // still down at +150 ms, by which point this is a real dictation.
+        // is an ordinary modifier, so acting on the press itself would open
+        // the microphone (and its orange indicator) every time the user hit
+        // Cmd-C. The microphone opens only if the key is still down 150 ms
+        // after the press; the chime and panel follow its first audio.
         let work = DispatchWorkItem { [weak self] in
             guard let self, sessionID == id, phase == .armed else { return }
             pendingMicStart = nil
             phase = .recording
             Log.write("record: opening mic")
-            cue.start()
-            statusBar.showRecording()
 
-            // Cleanup mode comes from whatever app is in front, decided before
-            // the user speaks so the pre-warmed process has the right prompt.
+            // Cleanup mode comes from whatever app is in front as recording starts.
             sessionMode = currentMode()
 
+            armFirstAudioFallback(id)
             let transcriber = self.transcriber
             arm(deadlines.opening, id, stage: "dictation did not start",
                 message: "Dictation didn't start in time. Try again.")
             microphoneStart = Task { await self.openMicrophone(id, transcriber) }
         }
         pendingMicStart = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.micDelay, execute: work)
+        let remaining = max(0, pressed + Self.micDelay - ProcessInfo.processInfo.systemUptime)
+        DispatchQueue.main.asyncAfter(deadline: .now() + remaining, execute: work)
         return true
+    }
+
+    /// The first audio buffer reached this session: the microphone is live,
+    /// so the chime plays and the panel shows recording now, not before.
+    private func firstAudioArrived(_ id: Int, at time: TimeInterval, dbfs: Double) {
+        guard sessionID == id, phase == .recording, !startCuePlayed else { return }
+        startCuePlayed = true
+        firstAudioFallback?.cancel()
+        firstAudioFallback = nil
+        cue.start()
+        showRecordingState()
+    }
+
+    private func showRecordingState() {
+        guard !recordingShown else { return }
+        recordingShown = true
+        statusBar.showRecording()
+    }
+
+    private func armFirstAudioFallback(_ id: Int) {
+        firstAudioFallback?.cancel()
+        let seconds = deadlines.firstAudio
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, sessionID == id, phase == .recording, !startCuePlayed else { return }
+            firstAudioFallback = nil
+            Log.write("record: no audio \(Int(seconds * 1000)) ms after the mic delay; recording panel shown without the chime")
+            showRecordingState()
+        }
+        firstAudioFallback = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
     }
 
     private func openMicrophone(_ id: Int, _ transcriber: Transcriber) async -> Bool {
@@ -355,7 +408,15 @@ final class AppState {
             guard isCurrent(id, .recording), !Task.isCancelled else { await transcriber.cancel(); return false }
             step = .microphone
             // Buffers go to THIS session's transcriber, never a replacement.
-            capture.onBuffer = { buffer in transcriber.feed(buffer) }
+            // The first one tells the session the microphone is live.
+            let gate = FirstAudioGate()
+            capture.onBuffer = { [weak self] buffer in
+                transcriber.feed(buffer)
+                guard gate.claim() else { return }
+                let at = ProcessInfo.processInfo.systemUptime
+                let level = AudioLevel.dbfs(buffer)
+                DispatchQueue.main.async { self?.firstAudioArrived(id, at: at, dbfs: level) }
+            }
             try capture.start(convertingTo: format)
             // The mic is open; how long the user speaks is theirs.
             disarm()
@@ -395,16 +456,18 @@ final class AppState {
         pendingMicStart?.cancel()
         pendingMicStart = nil
         microphoneStart?.cancel()
+        firstAudioFallback?.cancel()
+        firstAudioFallback = nil
 
-        cue.stop()
         statusBar.showProcessing()
-        capture.stop()
+        // Bounds the stop grace, the converter flush and the transcription.
         arm(deadlines.transcribing, id, stage: "transcription did not finish",
             message: "Transcription stalled. Try again.")
 
         let opening = microphoneStart
         let mode = sessionMode
         let transcriber = self.transcriber
+        let grace = deadlines.stopGrace
         Task {
             defer { complete(id) }
             // begin() can still be suspended when the user stops. Wait for it
@@ -412,6 +475,16 @@ final class AppState {
             guard await opening?.value == true else {
                 await transcriber.cancel()
                 return
+            }
+            // The stop tap lands on or just after the last word, so listen a
+            // moment longer. Closing the mic then hands on the audio the
+            // converter held back. The stop chime follows the close, so it
+            // marks the mic as closed and is never recorded.
+            if grace > 0 { try? await Task.sleep(for: .milliseconds(Int(grace * 1000))) }
+            // An abandoned session leaves the mic to whatever owns it now.
+            if isCurrent(id, .processing) {
+                capture.stop()
+                if startCuePlayed { cue.stop() }
             }
             await transcribeAndInsert(id, transcriber, mode: mode)
         }
@@ -428,6 +501,8 @@ final class AppState {
         pendingMicStart?.cancel()
         pendingMicStart = nil
         microphoneStart?.cancel()
+        firstAudioFallback?.cancel()
+        firstAudioFallback = nil
         capture.stop()
         operations.cancel()
         arm(deadlines.cancelling, id, stage: "cancel did not finish", message: nil)
@@ -493,6 +568,8 @@ final class AppState {
         pendingMicStart?.cancel()
         pendingMicStart = nil
         microphoneStart = nil
+        firstAudioFallback?.cancel()
+        firstAudioFallback = nil
         operations.cancel()
         phase = .idle
         insertionTarget = nil
@@ -553,6 +630,7 @@ final class AppState {
 
     #if SESSION_RECOVERY_TESTS
     var testingPhase: String { "\(phase)" }
+    var testingRecordingShown: Bool { recordingShown }
     private(set) var testingLastMessage: String?
     #endif
 

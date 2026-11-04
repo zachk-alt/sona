@@ -7,27 +7,60 @@ import AVFoundation
 // or calls an AI provider; fake transcripts are empty, so nothing is inserted.
 // The menu bar icon and the recording panel do appear while it runs.
 
+/// What happened, in order, across the fake microphone and cues.
+final class EventOrder {
+    private(set) var events: [String] = []
+    func note(_ event: String) { events.append(event) }
+}
+
 final class FakeCapture: AudioCapturing {
     var onBuffer: ((AVAudioPCMBuffer) -> Void)?
     var onLevel: ((Float) -> Void)?
     var onSpectrum: (([Float]) -> Void)?
     var failNextStart = false
+    let order: EventOrder?
     private(set) var starts = 0
+    private(set) var stops = 0
+    private(set) var running = false
+    /// Uptime of the last start and stop.
+    private(set) var startedAt = 0.0, stoppedAt = 0.0
+    init(order: EventOrder? = nil) { self.order = order }
     func start(convertingTo format: AVAudioFormat?) throws {
         if failNextStart {
             failNextStart = false
             throw FrameworkException(name: "com.apple.coreaudio.avfaudio", reason: "Failed to create tap due to format mismatch")
         }
         starts += 1
+        running = true
+        startedAt = ProcessInfo.processInfo.systemUptime
+        order?.note("mic open")
     }
-    func stop() {}
+    func stop() {
+        guard running else { return }
+        running = false
+        stops += 1
+        stoppedAt = ProcessInfo.processInfo.systemUptime
+        order?.note("mic closed")
+    }
+    /// One 100 ms buffer of quiet tone, delivered off the main thread like the tap.
+    func deliver() {
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1600)!
+        buffer.frameLength = 1600
+        for i in 0..<1600 { buffer.floatChannelData![0][i] = 0.1 * sin(Float(i) * 0.2) }
+        let callback = onBuffer
+        DispatchQueue.global().async { callback?(buffer) }
+    }
 }
 
 final class SilentCue: CuePlaying {
+    let order: EventOrder?
+    private(set) var starts = 0, stops = 0
+    init(order: EventOrder? = nil) { self.order = order }
     func prepare(choice: String?, startFile: String?, stopFile: String?, reverbMix: Double) {}
     func setSound(_ id: String) {}
-    func start() {}
-    func stop() {}
+    func start() { starts += 1; order?.note("start chime") }
+    func stop() { stops += 1; order?.note("stop chime") }
 }
 
 /// A speech engine that can stall at one stage until released.
@@ -116,11 +149,14 @@ final class SessionRecoveryTests: NSObject, NSApplicationDelegate {
 
     /// Engines handed out in order, one per AppState transcriber slot.
     func makeState(_ engines: [FakeTranscriber], capture: FakeCapture = FakeCapture(),
-                   deadline: TimeInterval = 1.0) -> AppState {
+                   cue: SilentCue = SilentCue(), deadline: TimeInterval = 1.0,
+                   firstAudio: TimeInterval = 1.5) -> AppState {
         var queue = engines
+        var deadlines = Self.deadlines(deadline)
+        deadlines.firstAudio = firstAudio
         return AppState(config: Self.config,
                         makeTranscriber: { queue.isEmpty ? FakeTranscriber() : queue.removeFirst() },
-                        capture: capture, cue: SilentCue(), deadlines: Self.deadlines(deadline))
+                        capture: capture, cue: cue, deadlines: deadlines)
     }
 
     /// Presses the hotkey, holds it until the mic is open, releases.
@@ -137,6 +173,7 @@ final class SessionRecoveryTests: NSObject, NSApplicationDelegate {
     }
 
     func run() async {
+        await startTiming()
         // A healthy dictation returns to ready and the next press is accepted.
         do {
             let engine = FakeTranscriber()
@@ -260,6 +297,97 @@ final class SessionRecoveryTests: NSObject, NSApplicationDelegate {
             _ = state.handle(.commit)
             check(await dictate(state), "The next press is accepted")
             check(await eventually { state.testingPhase == "idle" } && capture.starts == 1, "And it opens the microphone and completes")
+        }
+    }
+}
+
+extension SessionRecoveryTests {
+    /// Start and stop timing: the mic delay runs from the physical press, the
+    /// chime and panel wait for the first audio, and the stop keeps listening
+    /// briefly before the mic closes and the stop chime plays.
+    func startTiming() async {
+        // The chime means the microphone is live.
+        do {
+            let order = EventOrder()
+            let capture = FakeCapture(order: order), cue = SilentCue(order: order)
+            let state = makeState([FakeTranscriber()], capture: capture, cue: cue)
+            check(state.handle(.begin), "A press is accepted")
+            check(await eventually { capture.starts == 1 }, "The microphone opens after the delay")
+            await wait(0.15)
+            check(cue.starts == 0 && !state.testingRecordingShown, "No chime and no recording panel before the first audio")
+            capture.deliver()
+            check(await eventually { cue.starts == 1 && state.testingRecordingShown }, "The first audio plays the chime and shows recording")
+            capture.deliver(); capture.deliver()
+            await wait(0.1)
+            check(cue.starts == 1, "Later audio does not replay the chime")
+            let released = ProcessInfo.processInfo.systemUptime
+            _ = state.handle(.commit)
+            check(await eventually { state.testingPhase == "idle" }, "The dictation finishes")
+            let grace = capture.stoppedAt - released
+            check(grace >= 0.1 && grace < 0.5, "The mic keeps listening about 120 ms after the stop (\(Int(grace * 1000)) ms)")
+            check(order.events == ["mic open", "start chime", "mic closed", "stop chime"],
+                  "The start chime follows audio and the stop chime follows the mic closing: \(order.events)")
+        }
+
+        // A microphone that sends nothing: the panel still shows, the chime never lies.
+        do {
+            let capture = FakeCapture(), cue = SilentCue()
+            let state = makeState([FakeTranscriber()], capture: capture, cue: cue, firstAudio: 0.3)
+            check(state.handle(.begin), "A press with a silent microphone is accepted")
+            check(await eventually { capture.starts == 1 }, "Its microphone opens")
+            check(!state.testingRecordingShown, "Recording is not shown at once")
+            check(await eventually { state.testingRecordingShown }, "The first-audio deadline shows recording anyway")
+            check(cue.starts == 0, "No start chime plays without audio")
+            _ = state.handle(.commit)
+            check(await eventually { state.testingPhase == "idle" }, "A session that heard nothing still returns to ready")
+            check(cue.stops == 0, "No stop chime plays for a session whose start chime never played")
+            check(capture.stops == 1, "Its microphone is closed")
+        }
+
+        // Audio that arrives late, after the fallback, still plays the chime once.
+        do {
+            let capture = FakeCapture(), cue = SilentCue()
+            let state = makeState([FakeTranscriber()], capture: capture, cue: cue, firstAudio: 0.2)
+            _ = state.handle(.begin)
+            check(await eventually { state.testingRecordingShown }, "The fallback shows recording")
+            capture.deliver()
+            check(await eventually { cue.starts == 1 }, "Late first audio still plays the chime once")
+            _ = state.handle(.commit)
+            check(await eventually { state.testingPhase == "idle" } && cue.stops == 1, "And the stop chime plays")
+        }
+
+        // The 150 ms mic delay counts from the physical press, not from when
+        // the main thread handled it, so focus checks run inside it.
+        do {
+            let capture = FakeCapture()
+            let state = makeState([FakeTranscriber()], capture: capture)
+            let pressed = ProcessInfo.processInfo.systemUptime
+            _ = state.handle(.begin, timing: HotKeyTiming(pressedAt: pressed))
+            await wait(0.08)
+            check(capture.starts == 0, "The microphone does not open before the delay")
+            check(await eventually { capture.starts == 1 }, "It opens after the delay")
+            let delay = capture.startedAt - pressed
+            check(delay >= 0.14, "A fresh press waits the full 150 ms (\(Int(delay * 1000)) ms)")
+            _ = state.handle(.discard)
+            check(await eventually { state.testingPhase == "idle" }, "Discard returns to ready")
+
+            // A press the main thread saw 150 ms late opens at once.
+            let early = ProcessInfo.processInfo.systemUptime - 0.15
+            _ = state.handle(.begin, timing: HotKeyTiming(pressedAt: early))
+            check(await eventually(0.12) { capture.starts == 2 }, "A press handled late does not wait another 150 ms")
+            _ = state.handle(.discard)
+            check(await eventually { state.testingPhase == "idle" }, "Discard returns to ready")
+        }
+
+        // A tap shorter than the delay opens nothing and plays nothing.
+        do {
+            let capture = FakeCapture(), cue = SilentCue()
+            let state = makeState([FakeTranscriber()], capture: capture, cue: cue)
+            _ = state.handle(.begin)
+            _ = state.handle(.commit)
+            await wait(0.3)
+            check(capture.starts == 0 && cue.starts == 0 && cue.stops == 0 && state.testingPhase == "idle",
+                  "A press released inside the delay opens no microphone and plays no chime")
         }
     }
 }

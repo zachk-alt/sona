@@ -64,7 +64,9 @@ final class AudioCapture: AudioCapturing {
     /// or a start that delivers no audio throws it away, so the next open is fresh.
     private var engine: AVAudioEngine?
     private var running = false
-    private var converter: AVAudioConverter?
+    /// Shared by the audio thread (conversion) and main (open, stop, flush).
+    private let converterLock = NSLock()
+    private var converter: CaptureConverter?
     private var targetFormat: AVAudioFormat?
     private var configurationObserver: NSObjectProtocol?
     private var stallTimer: Timer?
@@ -103,7 +105,7 @@ final class AudioCapture: AudioCapturing {
     ///   converted into it before `onBuffer` fires.
     func start(convertingTo format: AVAudioFormat?) throws {
         guard !running else { return }
-        targetFormat = format
+        converterLock.withLock { targetFormat = format }
         reopenCount = 0
         let reused = engine != nil
         do {
@@ -143,8 +145,21 @@ final class AudioCapture: AudioCapturing {
                 self.engine = nil
             }
         }
-        converter = nil
+        // The converter holds back the last few milliseconds of audio (0 to
+        // 78 ms measured). Hand them to the engine before closing.
+        deliverTail(replacingConverterWith: nil)
         setLevel(0)
+    }
+
+    /// Flushes the current converter's held-back audio to `onBuffer`, then
+    /// installs `next`. Called on main; the lock keeps the audio thread out.
+    private func deliverTail(replacingConverterWith next: CaptureConverter?) {
+        let tail = converterLock.withLock { () -> [AVAudioPCMBuffer] in
+            let held = converter?.flush() ?? []
+            converter = next
+            return held
+        }
+        tail.forEach { onBuffer?($0) }
     }
 
     /// Taps and starts the current engine, or a new one when there is none.
@@ -160,10 +175,11 @@ final class AudioCapture: AudioCapturing {
                 throw TranscriptionError.unavailable("microphone reported no format")
             }
 
+            // A reopen hands on what the previous device's converter held.
             if let format, format != sourceFormat {
-                converter = AVAudioConverter(from: sourceFormat, to: format)
+                deliverTail(replacingConverterWith: try CaptureConverter(from: sourceFormat, to: format))
             } else {
-                converter = nil
+                deliverTail(replacingConverterWith: nil)
             }
 
             try catchingFrameworkException {
@@ -178,7 +194,7 @@ final class AudioCapture: AudioCapturing {
         } catch {
             discard(engine)
             self.engine = nil
-            converter = nil
+            converterLock.withLock { converter = nil }
             throw error
         }
         self.engine = engine
@@ -286,30 +302,16 @@ final class AudioCapture: AudioCapturing {
         updateLevel(from: buffer)
         updateSpectrum(from: buffer)
 
-        guard let targetFormat, let converter else {
-            onBuffer?(buffer)
-            return
-        }
-
-        let ratio = targetFormat.sampleRate / buffer.format.sampleRate
-        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1024
-        guard let converted = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity)
-        else { return }
-
-        var supplied = false
-        var error: NSError?
-        converter.convert(to: converted, error: &error) { _, status in
-            if supplied {
-                status.pointee = .noDataNow
-                return nil
-            }
-            supplied = true
-            status.pointee = .haveData
+        let output: AVAudioPCMBuffer? = converterLock.withLock {
+            if let converter { return converter.convert(buffer) }
+            // No converter: only a buffer already in the engine's format may
+            // pass. One that arrives as the mic closes is dropped, never fed
+            // to the engine at the wrong rate.
+            if let targetFormat, buffer.format != targetFormat { return nil }
             return buffer
         }
-
-        guard error == nil, converted.frameLength > 0 else { return }
-        onBuffer?(converted)
+        guard let output else { return }
+        onBuffer?(output)
     }
 
     /// RMS over the first channel. vDSP_rmsqv measured 243-276 ns per buffer,
@@ -367,5 +369,77 @@ final class AudioCapture: AudioCapturing {
         DispatchQueue.main.async { [weak self] in
             self?.onLevel?(value)
         }
+    }
+}
+
+/// Converts microphone buffers into the speech engine's format.
+///
+/// Runs at the converter's highest quality: the Mastering algorithm ("higher
+/// quality range, more expensive", AudioConverter.h) at AVAudioQuality.max.
+/// The default (Normal) dulled the highest frequencies a little. A sample-rate
+/// converter holds back a few milliseconds of audio between calls; `flush`
+/// returns them once input has ended, so the last sound before stop is heard.
+final class CaptureConverter {
+    let format: AVAudioFormat
+    private let converter: AVAudioConverter
+    private var ended = false
+
+    init(from source: AVAudioFormat, to target: AVAudioFormat) throws {
+        guard let converter = AVAudioConverter(from: source, to: target) else {
+            throw TranscriptionError.unavailable("no converter from the microphone format to the speech format")
+        }
+        try catchingFrameworkException {
+            converter.sampleRateConverterAlgorithm = AVSampleRateConverterAlgorithm_Mastering
+            converter.sampleRateConverterQuality = AVAudioQuality.max.rawValue
+        }
+        self.converter = converter
+        self.format = target
+    }
+
+    var algorithm: String? { converter.sampleRateConverterAlgorithm }
+    var quality: Int { converter.sampleRateConverterQuality }
+
+    /// One microphone buffer in, whatever the converter releases out.
+    func convert(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard !ended, let converted = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity(for: buffer.frameLength, from: buffer.format))
+        else { return nil }
+        var supplied = false
+        var error: NSError?
+        let status = converter.convert(to: converted, error: &error) { _, status in
+            if supplied {
+                status.pointee = .noDataNow
+                return nil
+            }
+            supplied = true
+            status.pointee = .haveData
+            return buffer
+        }
+        guard error == nil, status != .error, converted.frameLength > 0 else { return nil }
+        return converted
+    }
+
+    /// Ends the input and returns the audio the converter was still holding.
+    /// The converter takes no more input afterwards.
+    func flush() -> [AVAudioPCMBuffer] {
+        guard !ended else { return [] }
+        ended = true
+        var tail: [AVAudioPCMBuffer] = []
+        // Each pass drains up to a quarter second; the held audio is far less.
+        for _ in 0..<8 {
+            guard let out = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(max(1, format.sampleRate / 4)))
+            else { break }
+            var error: NSError?
+            let status = converter.convert(to: out, error: &error) { _, status in
+                status.pointee = .endOfStream
+                return nil
+            }
+            if error == nil, status != .error, out.frameLength > 0 { tail.append(out) }
+            if error != nil || status != .haveData || out.frameLength == 0 { break }
+        }
+        return tail
+    }
+
+    private func capacity(for frames: AVAudioFrameCount, from source: AVAudioFormat) -> AVAudioFrameCount {
+        AVAudioFrameCount(Double(frames) * format.sampleRate / source.sampleRate) + 1024
     }
 }
