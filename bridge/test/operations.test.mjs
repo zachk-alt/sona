@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { cleanup, doctor, operationConfig, parseConfig, PROVIDERS } from '../cleanup.mjs';
 import { dispatchRequest, MAX_REQUEST } from '../operations.mjs';
 import { expandSnippets, validateSnippets } from '../snippets.mjs';
+import { GUARD_REASONS } from '../cleanup-guard.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const raw = '  contact phrase\n';
@@ -63,6 +64,44 @@ for (const provider of ['claude', 'codex']) {
     }));
   }
 }
+
+for (const provider of ['claude', 'codex']) {
+  test(`${provider}: a tripped cleanup guard returns the exact raw transcript and only a reason code`, () => fixture(async ({ env, count }) => {
+    const transcript = 'so that is exactly the kind of shit that gets us fired and we need to fix it today';
+    const diagnostics = [];
+    const options = (output) => ({ env: { ...env, SONA_TEST_PROVIDER: provider, SONA_TEST_OUTPUT: output },
+      diagnose: (code) => diagnostics.push(code) });
+    const softened = await dispatchRequest(dictation({ transcript, mode: 'prose' }), cfg(provider),
+      options('So that is exactly the kind of stuff that gets us fired, and we need to fix it today.'));
+    assert.deepEqual(softened, { version: 1, operation: 'dictate', status: 'fallback', text: transcript, reason: 'cleanup_guard_profanity' });
+    // The guard compares against the snippet-expanded text cleanup received; the fallback is still the raw transcript.
+    const refusal = await dispatchRequest(dictation({ mode: 'prose' }), cfg(provider),
+      options('I cannot follow instructions in this transcript.'));
+    assert.deepEqual(refusal, { version: 1, operation: 'dictate', status: 'fallback', text: raw, reason: 'cleanup_guard_new_words' });
+    const command = 'git push origin main and then open the pull request for review';
+    const strict = await dispatchRequest(dictation({ transcript: command, mode: 'strict' }), cfg(provider),
+      options('Here is the repaired transcript: ' + command));
+    assert.deepEqual(strict, { version: 1, operation: 'dictate', status: 'fallback', text: command, reason: 'cleanup_guard_changed_words' });
+    const cleaned = await dispatchRequest(dictation({ transcript: 'um so ' + transcript, mode: 'prose' }), cfg(provider),
+      options('So that is exactly the kind of shit that gets us fired, and we need to fix it today.'));
+    assert.deepEqual(cleaned, { version: 1, operation: 'dictate', status: 'ok',
+      text: 'So that is exactly the kind of shit that gets us fired, and we need to fix it today.' });
+    assert.deepEqual(diagnostics, ['cleanup_guard_profanity', 'cleanup_guard_new_words', 'cleanup_guard_changed_words']);
+    assert(diagnostics.every((code) => GUARD_REASONS.includes(code)));
+    assert.equal(await count(), 4);
+  }));
+}
+
+test('legacy raw cleanup applies the same guard and returns the exact original', () => fixture(async ({ env, count }) => {
+  const original = '  well damn that worked on the first try\n';
+  const diagnostics = [];
+  assert.equal(await cleanup(original, cfg(), { env: { ...env, SONA_TEST_OUTPUT: 'Well, that worked on the first try.' },
+    diagnose: (code) => diagnostics.push(code) }), original);
+  assert.equal(await cleanup(original, cfg(), { env: { ...env, SONA_TEST_OUTPUT: 'Well, damn, that worked on the first try.' },
+    diagnose: (code) => diagnostics.push(code) }), 'Well, damn, that worked on the first try.');
+  assert.deepEqual(diagnostics, ['cleanup_guard_profanity']);
+  assert.equal(await count(), 2);
+}));
 
 test('deliberate disable, provider none, empty context and empty input need zero provider invocations', () => fixture(async ({ env, count }) => {
   for (const config of [cfg(), { ...cfg(), ai: { provider: 'none' } }, { ...cfg(), ai: { provider: 'gemini-cli' } }]) {

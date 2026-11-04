@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BridgeError, fail } from './errors.mjs';
 import { expandSnippets, validateSnippets } from './snippets.mjs';
+import { cleanupGuard } from './cleanup-guard.mjs';
 export { BridgeError } from './errors.mjs';
 import { GEMINI_MODEL, GEMINI_VERSION, geminiInput, geminiVersion, parseGeminiOutput, prepareGemini } from './gemini-cli.mjs';
 
@@ -372,6 +373,8 @@ export async function cleanup(original, rawConfig = {}, { mode = 'prose', env = 
     const result = await oneRequest({ transcript: expanded, vocabulary: config.vocabulary }, config, { prompt: mode, env, signal });
     const text = validateText(result, expanded);
     if (Buffer.byteLength(text) > MAX_INPUT) fail('invalid_cleaned_text');
+    const tripped = cleanupGuard(expanded, text);
+    if (tripped) fail(tripped);
     return text;
   } catch (error) {
     diagnose(error instanceof BridgeError ? error.code : 'bridge_failed');

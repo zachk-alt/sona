@@ -1,4 +1,5 @@
 import { MAX_INPUT, oneRequest, parseConfig, validateText } from './cleanup.mjs';
+import { cleanupGuard } from './cleanup-guard.mjs';
 import { fail, reasonFor } from './errors.mjs';
 import { expandSnippets, sameTrigger, validateSnippets } from './snippets.mjs';
 import { assistantRequest, assistantSettings, validateAssistantInput } from './assistant.mjs';
@@ -87,6 +88,10 @@ export async function dispatchRequest(request, rawConfig = {}, { env = process.e
       const result = await invoke({ transcript: expanded, vocabulary: config.vocabulary }, request.mode);
       const text = validateText(result, expanded);
       if (Buffer.byteLength(text) > MAX_INPUT) fail('invalid_cleaned_text');
+      // A refusal, dropped paragraph, pasted word list or softened swear falls
+      // back to the exact raw transcript with a fixed reason code.
+      const tripped = cleanupGuard(expanded, text);
+      if (tripped) fail(tripped);
       return { ...base, status: 'ok', text };
     }
     if (request.operation === 'rewrite') {
