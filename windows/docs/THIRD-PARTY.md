@@ -9,6 +9,7 @@ Verified against primary project/package documentation on 2026-09-05.
 | Whisper.net | 1.9.1, local inference bindings; MIT | https://www.nuget.org/packages/Whisper.net/1.9.1 and https://github.com/sandrohanea/whisper.net |
 | Whisper.net.Runtime / NoAvx | 1.9.1, bundled native CPU inference; MIT | https://github.com/sandrohanea/whisper.net/blob/main/readme.md |
 | Whisper multilingual base model | ggml-base.bin, 147951465 bytes, SHA256 `60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe` | https://huggingface.co/ggerganov/whisper.cpp/tree/5359861c739e955e79d9a303bcbc70fb988958b1 |
+| Whisper English-only base model | ggml-base.en.bin, 147964211 bytes, SHA256 `a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002` (Git LFS metadata, read 2026-11-04) | https://huggingface.co/ggerganov/whisper.cpp/blob/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.en.bin |
 | Node.js | v24.20.0, private installer runtime, SHA256 checked; Node license included with install | https://nodejs.org/dist/v24.20.0/SHASUMS256.txt |
 | Microsoft VC++ redistributable | Official signed x64 runtime installer, needed by Whisper's Windows libraries | https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist |
 | JFK test fixture | Public presidential speech excerpt distributed in official whisper.cpp samples; no commercial music or voice model | https://github.com/ggml-org/whisper.cpp/blob/master/samples/jfk.wav |

@@ -16,7 +16,10 @@ internal sealed class App : Application
     private readonly string data = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Sona");
     private string ConfigPath => Path.Combine(data, "settings.json");
     private string AiPath => Path.Combine(data, "ai.json");
-    private string ModelPath => Path.Combine(data, "models", "ggml-base.bin");
+    private string ModelPath(SpeechModel model) => Path.Combine(data, "models", model.FileName);
+    // The verified model file dictation runs: the language's own model, or for an English install from before
+    // the English-only model, its verified multilingual model until Settings downloads base.en.
+    private SpeechModel? activeModel;
     private AppSettings settings = new();
     private Mutex? instance;
     private Forms.NotifyIcon? tray;
@@ -134,8 +137,15 @@ internal sealed class App : Application
         if (!settings.SetupComplete) { OpenSettings(); return; }
         try
         {
-            ready = await VerifiedDownloader.IsValidAsync(ModelPath, VerifiedDownloader.BaseModel);
-            if (ready) ResumeShortcut(); else OpenSettings();
+            var wanted = SpeechModels.For(settings.Language);
+            if (await VerifiedDownloader.IsValidAsync(ModelPath(wanted), wanted.Download)) activeModel = wanted;
+            else if (wanted != SpeechModels.Multilingual && await VerifiedDownloader.IsValidAsync(ModelPath(SpeechModels.Multilingual), SpeechModels.Multilingual.Download))
+                activeModel = SpeechModels.Multilingual;
+            ready = activeModel != null;
+            if (activeModel == wanted) ResumeShortcut();
+            // Migration: dictation keeps working on the verified multilingual model; Save in Settings fetches base.en.
+            else if (ready) OpenSettings("Sona now uses Whisper's English-only model for English, which tends to be more accurate. Save to download it once (about 148 MB). Until then, dictation keeps using the current model.");
+            else OpenSettings();
         }
         catch { OpenSettings(); }
     }
@@ -151,13 +161,14 @@ internal sealed class App : Application
         try { hotkey?.Configure(settings.Shortcut); }
         catch (Exception e) { Notify(e.Message); }
     }
-    private void OpenSettings()
+    private void OpenSettings() => OpenSettings(null);
+    private void OpenSettings(string? notice)
     {
         if (busy) { Notify("Finish or cancel this dictation before opening settings."); return; }
         if (preferences != null) { preferences.Activate(); return; }
         StopLearning();
         hotkey?.Disable();
-        preferences = new SettingsWindow(settings, AiPath, ApplySettingsAsync, AssistAsync, () => { preferences = null; ResumeShortcut(); });
+        preferences = new SettingsWindow(settings, AiPath, ApplySettingsAsync, AssistAsync, () => { preferences = null; ResumeShortcut(); }, notice);
         preferences.Show();
     }
     private async Task ApplySettingsAsync(AppSettings next, string provider, string model, string[] vocabulary, Snippet[] snippets, IProgress<double> progress, CancellationToken cancellation)
@@ -165,7 +176,8 @@ internal sealed class App : Application
         // Verify availability while the settings window owns focus, then disable until setup finishes.
         hotkey!.Configure(next.Shortcut); hotkey.Disable();
         StopLearning();
-        await new VerifiedDownloader(http).DownloadAsync(ModelPath, VerifiedDownloader.BaseModel, progress, cancellation);
+        var speech = SpeechModels.For(next.Language);
+        await new VerifiedDownloader(http).DownloadAsync(ModelPath(speech), speech.Download, progress, cancellation);
         JsonObject document;
         try { document = JsonNode.Parse(File.ReadAllText(AiPath)) as JsonObject ?? throw new InvalidDataException("AI configuration must be a JSON object."); }
         catch (FileNotFoundException) { document = new(); }
@@ -201,7 +213,7 @@ internal sealed class App : Application
             }
             throw;
         }
-        settings = next; ready = true;
+        settings = next; activeModel = speech; ready = true;
     }
     private async Task ToggleAsync()
     {
@@ -246,7 +258,8 @@ internal sealed class App : Application
             bool audible = recorder.HasSpeech; recorder.Dispose();
             if (!audible || audio.Length < 4000) { sessionFailure = "No speech was detected."; return; }
             operation!.CancelAfter(TimeSpan.FromSeconds(120));
-            var text = await transcriber.TranscribeAsync(audio, ModelPath, settings.Language, operation.Token);
+            var speech = activeModel ?? SpeechModels.For(settings.Language);
+            var text = await transcriber.TranscribeAsync(audio, ModelPath(speech), SpeechModels.WhisperLanguage(speech, settings.Language), operation.Token);
             if (string.IsNullOrWhiteSpace(text)) { sessionFailure = "No speech was detected."; return; }
             // Snippets run inside the bridge before optional cleanup, including when cleanup is off.
             string raw = text;

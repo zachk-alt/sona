@@ -9,10 +9,21 @@ namespace Sona.Windows;
 internal sealed class Transcriber : IDisposable
 {
     private WhisperFactory? factory;
+    private string? factoryPath;
+    // A processor whose dispose did not finish may still run on its factory. Such a factory is kept alive,
+    // never freed under it, when a language change selects another model file.
+    private bool processorMayLinger;
+    private readonly List<WhisperFactory> retained = [];
     public Task<string> TranscribeAsync(byte[] recording, string modelPath, string language, CancellationToken cancellation) => Task.Run(async () =>
     {
         RuntimeOptions.RuntimeLibraryOrder = [RuntimeLibrary.Cpu, RuntimeLibrary.CpuNoAvx];
+        if (factory != null && !string.Equals(factoryPath, modelPath, StringComparison.OrdinalIgnoreCase))
+        {
+            if (processorMayLinger) retained.Add(factory); else factory.Dispose();
+            factory = null; factoryPath = null; processorMayLinger = false;
+        }
         factory ??= WhisperFactory.FromPath(modelPath);
+        factoryPath = modelPath;
         using var raw = new MemoryStream(recording, false);
         using var reader = new WaveFileReader(raw);
         ISampleProvider audio = reader.ToSampleProvider();
@@ -38,7 +49,7 @@ internal sealed class Transcriber : IDisposable
         {
             // A cancelled run can still hold the processor until the native abort lands. The synchronous
             // Dispose throws in that window, so dispose asynchronously and stop waiting after 5 s.
-            try { await processor.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)); } catch { }
+            try { await processor.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)); } catch { processorMayLinger = true; }
         }
     }, cancellation);
     public void Dispose() { factory?.Dispose(); factory = null; }

@@ -40,7 +40,7 @@ internal sealed class SettingsWindow : Window
     private CancellationTokenSource? setupCancellation;
 
     public SettingsWindow(AppSettings settings, string aiConfigPath,
-        Func<AppSettings, string, string, string[], Snippet[], IProgress<double>, CancellationToken, Task> apply, Func<string, CancellationToken, Task<BridgeReply>> assist, Action resume)
+        Func<AppSettings, string, string, string[], Snippet[], IProgress<double>, CancellationToken, Task> apply, Func<string, CancellationToken, Task<BridgeReply>> assist, Action resume, string? notice = null)
     {
         current = settings; selectedShortcut = settings.Shortcut; this.apply = apply; this.assist = assist; this.resume = resume;
         Title = settings.SetupComplete ? "Sona settings" : "Welcome to Sona";
@@ -66,7 +66,10 @@ internal sealed class SettingsWindow : Window
         stack.Children.Add(Description("Windows must allow microphone access and let desktop apps access your microphone. Desktop apps do not always show an individual permission prompt. Sona opens the microphone only while recording."));
         Label(stack, "Speech language");
         foreach (var l in new[] { "auto", "en", "es", "fr", "de", "it", "pt", "ja", "ko", "zh", "hi", "ar" }) language.Items.Add(l);
-        language.SelectedItem = settings.Language; if (language.SelectedIndex < 0) language.SelectedIndex = 0; stack.Children.Add(language);
+        // A saved language outside this list is the user's choice: show it rather than replacing it on Save.
+        if (!language.Items.Contains(settings.Language)) language.Items.Add(settings.Language);
+        language.SelectedItem = settings.Language; stack.Children.Add(language);
+        stack.Children.Add(Description("English uses Whisper's English-only model, which tends to be more accurate for English. Auto and other languages use the multilingual model. Auto guesses the language on every recording."));
         Label(stack, "Optional AI cleanup"); cleanup.IsChecked = settings.CleanupEnabled; stack.Children.Add(cleanup);
         foreach (var option in new[] {
             new ProviderOption("auto", "Automatic (installed CLI)"),
@@ -148,13 +151,14 @@ internal sealed class SettingsWindow : Window
         Label(stack, "Node executable (optional override)"); node.Text = settings.NodePath ?? ""; stack.Children.Add(node);
         stack.Children.Add(Description("The installer includes Node for the shared cleanup bridge. An existing Node 20+ installation can also be used; Gemini CLI requires Node 24+."));
         login.IsChecked = settings.StartAtLogin; login.Margin = new Thickness(0, 12, 0, 10); stack.Children.Add(login);
-        stack.Children.Add(Description("First setup downloads the verified multilingual Whisper base model, about 148 MB. The model stays in your local Sona folder. Sona keeps recordings and the last transcript in memory. Selected AI providers have their own retention policies."));
+        stack.Children.Add(Description("Setup downloads the verified Whisper base model for your language, about 148 MB: English-only for English, multilingual otherwise. Switching between English and another language downloads the other model once. Models stay in your local Sona folder. Sona keeps recordings and the last transcript in memory. Selected AI providers have their own retention policies."));
         stack.Children.Add(progress); stack.Children.Add(status); stack.Children.Add(save);
         var cancelSetup = new Button { Content = "Cancel setup download", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 8, 0, 0) };
         cancelSetup.Click += (_, _) => setupCancellation?.Cancel(); stack.Children.Add(cancelSetup);
         save.Click += async (_, _) => await SaveAsync();
         Closing += (_, e) => { if (preparing) { e.Cancel = true; setupCancellation?.Cancel(); status.Text = "Cancelling setup…"; } };
         Closed += (_, _) => { assistanceCancellation?.Cancel(); resume(); };
+        if (!string.IsNullOrEmpty(notice)) status.Text = string.IsNullOrEmpty(status.Text) ? notice : status.Text + " " + notice;
     }
     private static TextBlock Description(string text) => new() { Text = text, TextWrapping = TextWrapping.Wrap, FontSize = 12, Foreground = new SolidColorBrush(Color.FromRgb(82, 91, 107)), Margin = new Thickness(0, 7, 0, 10) };
     private static void Label(Panel panel, string text) => panel.Children.Add(new TextBlock { Text = text, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 13, 0, 6) });
@@ -199,7 +203,7 @@ internal sealed class SettingsWindow : Window
             var next = current with
             {
                 SetupComplete = true, Shortcut = selectedShortcut, AutoAddToDictionary = autoAdd.IsChecked == true, CleanupEnabled = cleanup.IsChecked == true,
-                MicrophoneId = (devices.SelectedItem as DeviceOption)?.Id, Language = language.SelectedItem as string ?? "auto",
+                MicrophoneId = (devices.SelectedItem as DeviceOption)?.Id, Language = language.SelectedItem as string ?? AppSettings.DefaultLanguage,
                 NodePath = node.Text, StartAtLogin = login.IsChecked == true
             };
             snippetGrid.CommitEdit(DataGridEditingUnit.Cell, true); snippetGrid.CommitEdit(DataGridEditingUnit.Row, true);

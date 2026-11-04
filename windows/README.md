@@ -20,7 +20,7 @@ For an already downloaded package:
 .\install-windows.ps1 -PackagePath .\Sona-windows-x64.zip -Sha256 '<hash from trusted SHA256SUMS.txt>'
 ```
 
-First launch lets you select a keyboard shortcut and microphone, then downloads the multilingual Whisper base model (147,951,465 bytes). The model URL is pinned to a source revision and its SHA256 is checked before use. Cancel or retry the download in setup. Speech recognition works offline after setup. Optional remote AI cleanup requires its own connection.
+First launch lets you select a keyboard shortcut, microphone and speech language (English by default), then downloads the Whisper base model for that language: the English-only `ggml-base.en.bin` (147,964,211 bytes) for English, or the multilingual `ggml-base.bin` (147,951,465 bytes) for Auto and other languages. Each model URL is pinned to a source revision and its SHA256 is checked before use. An English install from an earlier version keeps dictating on its multilingual model and offers the one-time English download in Settings. Cancel or retry the download in setup. Speech recognition works offline after setup. Optional remote AI cleanup requires its own connection.
 
 ## Microphone access
 
@@ -46,7 +46,7 @@ Local settings and the verified model live in `%LOCALAPPDATA%\Sona`:
 
 - `settings.json`: selected shortcut, device, language, startup and cleanup preferences.
 - `ai.json`: shared bridge configuration, vocabulary, and snippets.
-- `models\ggml-base.bin`: local speech model.
+- `models\ggml-base.en.bin` (English) and/or `models\ggml-base.bin` (Auto and other languages): local speech models.
 
 Recordings and the last transcript are held in memory. Sona does not write dictation history. Explicit manual copying changes the clipboard normally. Cleanup is enabled for new setups and can be turned off in settings. Auto selection only uses an installed supported CLI and falls back to the raw transcript when none is available. With cleanup on, the transcript is sent to the configured AI provider; account limits or API charges still apply. Existing CLI sign-in stays with that CLI. API credentials must be supplied via the provider's environment variable, not copied into Sona configuration.
 

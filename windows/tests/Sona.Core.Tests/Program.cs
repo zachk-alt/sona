@@ -348,6 +348,108 @@ var split = script.At(0.6);
 Check(Math.Sign(split.One) != Math.Sign(split.Two) && split.Tail < 1, "lights leave in opposite directions and the tail fades");
 Check(LightScript.EaseInOut(0.5) is > 0.4999 and < 0.5001 && LightScript.EaseInOut(0.25) is > 0.12 and < 0.13, "ease in and out matches cubic-bezier(0.42, 0, 0.58, 1)");
 Check(PanelTiming.Smoothstep(0.5) == 0.5 && PanelTiming.Smoothstep(1) == 1, "dismissal smoothstep");
+// W1: English is the default for new installs; a saved choice, including "auto", is kept.
+Check(new AppSettings().Language == "en" && AppSettings.DefaultLanguage == "en", "new installs default to English");
+Check(new AppSettings { Language = "auto" }.Validate().Language == "auto", "auto stays selectable");
+Check(new AppSettings { Language = "  " }.Validate().Language == "en" && new AppSettings { Language = " de " }.Validate().Language == "de", "blank language falls back to English and a choice is trimmed");
+string languageTemp = Path.Combine(Path.GetTempPath(), "Sona-language-tests-" + Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(languageTemp);
+try
+{
+    string languageConfig = Path.Combine(languageTemp, "settings.json");
+    Check(SettingsStore.Load(languageConfig).Language == "en", "blank machine starts in English");
+    await File.WriteAllTextAsync(languageConfig, "{\"setupComplete\":true,\"language\":\"auto\"}");
+    Check(SettingsStore.Load(languageConfig).Language == "auto", "an existing explicit auto choice is kept");
+    SettingsStore.Save(languageConfig, SettingsStore.Load(languageConfig));
+    Check(SettingsStore.Load(languageConfig).Language == "auto", "saving keeps an explicit auto choice");
+    await File.WriteAllTextAsync(languageConfig, "{\"setupComplete\":true,\"language\":\"fr\"}");
+    Check(SettingsStore.Load(languageConfig).Language == "fr", "an existing explicit language is kept");
+    await File.WriteAllTextAsync(languageConfig, "{\"setupComplete\":true}");
+    Check(SettingsStore.Load(languageConfig).Language == "en", "settings with no language use the English default");
+    await File.WriteAllTextAsync(languageConfig, "{\"setupComplete\":true,\"language\":7}");
+    Check(SettingsStore.Load(languageConfig).Language == "en", "a malformed language uses the English default");
+}
+finally { Directory.Delete(languageTemp, recursive: true); }
+// W2: English gets the English-only base.en model; auto and other languages keep multilingual base.
+Check(SpeechModels.For("en") == SpeechModels.English && SpeechModels.For(" EN ") == SpeechModels.English && SpeechModels.For(new AppSettings().Language) == SpeechModels.English, "English selects base.en");
+Check(SpeechModels.For("auto") == SpeechModels.Multilingual && SpeechModels.For("fr") == SpeechModels.Multilingual && SpeechModels.For(null) == SpeechModels.Multilingual, "auto and other languages keep multilingual base");
+Check(SpeechModels.English.FileName == "ggml-base.en.bin" && SpeechModels.English.EnglishOnly && SpeechModels.English.Download.Size == 147964211
+    && SpeechModels.English.Download.Sha256 == "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002", "base.en pinned to its official LFS size and SHA-256");
+Check(SpeechModels.Multilingual.FileName == "ggml-base.bin" && !SpeechModels.Multilingual.EnglishOnly && SpeechModels.Multilingual.Download == VerifiedDownloader.BaseModel
+    && VerifiedDownloader.BaseModel.Sha256 == "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe", "multilingual base pin unchanged");
+Check(new[] { SpeechModels.English, SpeechModels.Multilingual }.All(m => m.Download.Url.Scheme == "https" && m.Download.Url.Host == "huggingface.co"
+    && m.Download.Url.AbsolutePath == "/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/" + m.FileName), "both models download from the same pinned whisper.cpp revision");
+Check(SpeechModels.WhisperLanguage(SpeechModels.English, "en") == "en" && SpeechModels.WhisperLanguage(SpeechModels.English, "EN") == "en"
+    && SpeechModels.WhisperLanguage(SpeechModels.Multilingual, "auto") == "auto" && SpeechModels.WhisperLanguage(SpeechModels.Multilingual, "fr") == "fr", "English-only model always hears en");
+// W3: per-window silence check on synthetic audio. Seeded, so every run is identical.
+var noiseRandom = new Random(20261104);
+double Gaussian() => Math.Sqrt(-2 * Math.Log(1 - noiseRandom.NextDouble())) * Math.Cos(2 * Math.PI * noiseRandom.NextDouble());
+float[] Scale(double[] x, double dbfs) { double rms = Math.Sqrt(x.Average(v => v * v)); double gain = Math.Pow(10, dbfs / 20) / Math.Max(rms, 1e-12); return x.Select(v => (float)(v * gain)).ToArray(); }
+float[] WhiteNoise(int n, double dbfs) => Scale(Enumerable.Range(0, n).Select(_ => Gaussian()).ToArray(), dbfs);
+float[] PinkNoise(int n, double dbfs)
+{
+    // Paul Kellet's economy pink filter: room and fan noise falls with frequency.
+    double b0 = 0, b1 = 0, b2 = 0; var x = new double[n];
+    for (int i = 0; i < n; i++) { double w = Gaussian(); b0 = 0.99765 * b0 + w * 0.0990460; b1 = 0.96300 * b1 + w * 0.2965164; b2 = 0.57000 * b2 + w * 1.0526913; x[i] = b0 + b1 + b2 + w * 0.1848; }
+    return Scale(x, dbfs);
+}
+float[] Mix(float[] a, float[] b) => a.Select((v, i) => v + (i < b.Length ? b[i] : 0)).ToArray();
+double Rms(float[] x) => Math.Sqrt(x.Average(v => (double)v * v));
+// Speech-like audio: voiced syllables (120 Hz with formant-weighted harmonics) of 150 to 250 ms, gaps of 60 to 140 ms.
+float[] Syllables(int rate, double seconds, double activeDbfs, double leadSeconds = 0.3)
+{
+    var x = new double[(int)(rate * seconds)]; int at = (int)(rate * leadSeconds); var voice = new Random(7);
+    var active = new List<(int Start, int End)>();
+    while (at < x.Length)
+    {
+        int length = (int)(rate * (0.15 + 0.1 * voice.NextDouble())), end = Math.Min(x.Length, at + length);
+        double pitch = 105 + 30 * voice.NextDouble();
+        for (int i = at; i < end; i++)
+        {
+            double t = (double)(i - at) / length, envelope = Math.Sin(Math.PI * t);
+            double sample = 0;
+            for (int h = 1; h <= 30; h++) { double f = pitch * h; if (f > rate / 2.0) break; double formant = Math.Exp(-Math.Pow((f - 600) / 250, 2)) + 0.6 * Math.Exp(-Math.Pow((f - 1500) / 300, 2)) + 0.3 * Math.Exp(-Math.Pow((f - 2600) / 400, 2)) + 0.02; sample += formant * Math.Sin(2 * Math.PI * f * i / rate) / h; }
+            x[i] = envelope * sample;
+        }
+        active.Add((at, end));
+        at = end + (int)(rate * (0.06 + 0.08 * voice.NextDouble()));
+    }
+    double activeRms = Math.Sqrt(active.Sum(r => Enumerable.Range(r.Start, r.End - r.Start).Sum(i => x[i] * x[i])) / Math.Max(1, active.Sum(r => r.End - r.Start)));
+    double gain = Math.Pow(10, activeDbfs / 20) / Math.Max(activeRms, 1e-12);
+    return x.Select(v => (float)(v * gain)).ToArray();
+}
+const int Rate = 48000;
+Check(!SpeechActivity.Detect(new float[Rate * 2], Rate), "digital silence is not speech");
+foreach (double level in new[] { -50.0, -45, -40 })
+foreach (double seconds in new[] { 1.0, 2.5, 4.0, 30.0 })
+{
+    var pink = PinkNoise((int)(Rate * seconds), level); var white = WhiteNoise((int)(Rate * seconds), level);
+    Check(!SpeechActivity.Detect(pink, Rate) && !SpeechActivity.Detect(white, Rate), $"room noise at {level} dBFS for {seconds} s is not speech");
+}
+Check(Rms(PinkNoise(Rate * 2, -50)) > 0.002, "room noise at -50 dBFS was above the old whole-recording cut-off of 0.002");
+var warmUp = new float[Rate * 2]; Array.Copy(PinkNoise(Rate * 2 - Rate * 15 / 100, -45), 0, warmUp, Rate * 15 / 100, Rate * 2 - Rate * 15 / 100);
+Check(!SpeechActivity.Detect(warmUp, Rate), "warm-up zeros before room noise do not lower the floor");
+var fadeIn = PinkNoise(Rate, -45); for (int i = 0; i < Rate / 10; i++) fadeIn[i] *= i / (Rate / 10f);
+Check(!SpeechActivity.Detect(fadeIn, Rate), "a device fade-in before room noise is not speech");
+var click = PinkNoise(Rate * 2, -50); for (int i = Rate; i < Rate + Rate * 6 / 100; i++) click[i] += 0.3f * MathF.Sin(i);
+Check(!SpeechActivity.Detect(click, Rate), "one 60 ms click is not speech");
+foreach (double level in new[] { -50.0, -45, -40 })
+    Check(SpeechActivity.Detect(Mix(Syllables(Rate, 2.0, -22), PinkNoise(Rate * 2, level)), Rate), $"speech over room noise at {level} dBFS is speech");
+Check(SpeechActivity.Detect(Mix(Syllables(Rate, 2.0, -28), PinkNoise(Rate * 2, -40)), Rate), "quiet speech 12 dB over -40 dBFS room noise is speech");
+Check(SpeechActivity.Detect(Mix(Syllables(Rate, 2.0, -45), PinkNoise(Rate * 2, -70)), Rate), "far quiet speech in a quiet room is speech");
+Check(SpeechActivity.Detect(Mix(Syllables(Rate, 2.0, -22, leadSeconds: 0), PinkNoise(Rate * 2, -45)), Rate), "speech that fills the whole recording is speech");
+var word = new float[Rate]; Array.Copy(Syllables(Rate, 0.6, -22, leadSeconds: 0.3), word, (int)(Rate * 0.6));
+Check(SpeechActivity.Detect(Mix(word, PinkNoise(Rate, -50)), Rate), "a single short word is speech");
+Check(SpeechActivity.Detect(Mix(Syllables(16000, 2.0, -22), PinkNoise(32000, -45)), 16000), "speech at 16 kHz is speech");
+float[] Interleave(float[] left, float[] right) { var x = new float[left.Length * 2]; for (int i = 0; i < left.Length; i++) { x[2 * i] = left[i]; x[2 * i + 1] = right[i]; } return x; }
+bool DetectStereo(float[] interleaved) { var activity = new SpeechActivity(Rate, 2); foreach (var v in interleaved) activity.Add(v); return activity.HasSpeech; }
+var stereoSpeech = Mix(Syllables(Rate, 2.0, -22), PinkNoise(Rate * 2, -45));
+Check(DetectStereo(Interleave(stereoSpeech, stereoSpeech)) && DetectStereo(Interleave(stereoSpeech, new float[stereoSpeech.Length])), "stereo speech is speech, even with one dead channel");
+Check(!DetectStereo(Interleave(PinkNoise(Rate * 2, -42), PinkNoise(Rate * 2, -42))), "stereo room noise is not speech");
+var withNan = Mix(Syllables(Rate, 2.0, -22), PinkNoise(Rate * 2, -45)); withNan[100] = float.NaN; withNan[5000] = float.PositiveInfinity;
+Check(SpeechActivity.Detect(withNan, Rate), "non-finite samples count as zero without breaking the check");
+var oneSecond = new SpeechActivity(Rate, 2); for (int i = 0; i < Rate * 2; i++) oneSecond.Add(0);
+Check(oneSecond.WindowCount == 33, "30 ms windows count frames, not interleaved samples");
 Console.WriteLine($"{tests} checks passed.");
 return 0;
 

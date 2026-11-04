@@ -18,7 +18,10 @@ public sealed record AppSettings
     public Shortcut Shortcut { get; init; } = new();
     public bool CleanupEnabled { get; init; } = true;
     public bool AutoAddToDictionary { get; init; }
-    public string Language { get; init; } = "auto";
+    // English for new installs (Whisper guesses the language on every clip under "auto"). A saved choice,
+    // including an explicit "auto", is kept as written.
+    public const string DefaultLanguage = "en";
+    public string Language { get; init; } = DefaultLanguage;
     public string? MicrophoneId { get; init; }
     public string? NodePath { get; init; }
     public bool StartAtLogin { get; init; }
@@ -28,7 +31,7 @@ public sealed record AppSettings
     {
         Shortcut = Shortcut is { IsValid: true } ? Shortcut : new Shortcut(),
         MaximumRecordingSeconds = Math.Clamp(MaximumRecordingSeconds, 5, 300),
-        Language = string.IsNullOrWhiteSpace(Language) ? "auto" : Language.Trim(),
+        Language = string.IsNullOrWhiteSpace(Language) ? DefaultLanguage : Language.Trim(),
         NodePath = string.IsNullOrWhiteSpace(NodePath) ? null : NodePath.Trim()
     };
 }
@@ -53,7 +56,7 @@ public static class SettingsStore
                 Version = Read("version", defaults.Version), SetupComplete = Read("setupComplete", false),
                 Shortcut = Read("shortcut", defaults.Shortcut),
                 AutoAddToDictionary = Read("autoAddToDictionary", false), CleanupEnabled = Read("cleanupEnabled", true),
-                Language = Read("language", "auto"), MicrophoneId = Read<string?>("microphoneId", null), NodePath = Read<string?>("nodePath", null),
+                Language = Read("language", AppSettings.DefaultLanguage), MicrophoneId = Read<string?>("microphoneId", null), NodePath = Read<string?>("nodePath", null),
                 StartAtLogin = Read("startAtLogin", false), MaximumRecordingSeconds = Read("maximumRecordingSeconds", 120)
             }).Validate();
         }

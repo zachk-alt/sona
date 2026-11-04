@@ -5,6 +5,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
+using NAudio.Wave;
 using Sona.Core;
 
 namespace Sona.Windows;
@@ -53,6 +54,31 @@ internal static class WindowsSelfTest
                 Check("whisper_jfk_country", normalized.Contains("country"));
                 Check("whisper_jfk_ask", normalized.Contains("ask"));
                 checks["whisper_fixture_result"] = text; // Public JFK fixture only, never user speech.
+                // English default: new installs pick base.en, verified against its pinned SHA-256. The same Transcriber
+                // then switches model files and back, as a language change in Settings does.
+                Check("english_default_selects_base_en", SpeechModels.For(new AppSettings().Language) == SpeechModels.English && SpeechModels.For("auto") == SpeechModels.Multilingual);
+                string englishModel = Path.Combine(Path.GetDirectoryName(model)!, SpeechModels.English.FileName);
+                await new VerifiedDownloader(http).DownloadAsync(englishModel, SpeechModels.English.Download, null, CancellationToken.None);
+                Check("english_model_sha256", await VerifiedDownloader.IsValidAsync(englishModel, SpeechModels.English.Download));
+                byte[] fixtureBytes = await File.ReadAllBytesAsync(fixture);
+                using var switchCancellation = new CancellationTokenSource(TimeSpan.FromMinutes(3)); // Fresh bound: the download above can be slow.
+                string englishText = await transcriber.TranscribeAsync(fixtureBytes, englishModel, SpeechModels.WhisperLanguage(SpeechModels.English, "en"), switchCancellation.Token);
+                Check("whisper_english_jfk_country", englishText.ToLowerInvariant().Contains("country"));
+                Check("whisper_english_jfk_ask", englishText.ToLowerInvariant().Contains("ask"));
+                checks["whisper_english_fixture_result"] = englishText;
+                string autoText = await transcriber.TranscribeAsync(fixtureBytes, model, "auto", switchCancellation.Token);
+                Check("whisper_switch_back_auto_country", autoText.ToLowerInvariant().Contains("country"));
+                // Silence check on Windows, fed the way AudioRecorder feeds it: interleaved samples at the file's format.
+                using (var reader = new WaveFileReader(new MemoryStream(fixtureBytes, false)))
+                {
+                    var samples = reader.ToSampleProvider(); var format = samples.WaveFormat;
+                    var speech = new SpeechActivity(format.SampleRate, format.Channels);
+                    var buffer = new float[4096]; int read;
+                    while ((read = samples.Read(buffer, 0, buffer.Length)) > 0) for (int i = 0; i < read; i++) speech.Add(buffer[i]);
+                    var silence = new SpeechActivity(format.SampleRate, format.Channels);
+                    for (int i = 0; i < format.SampleRate * format.Channels * 2; i++) silence.Add(0);
+                    Check("speech_activity_fixture", speech.HasSpeech && !silence.HasSpeech);
+                }
                 string config = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(output))!, "selftest-ai.json");
                 await File.WriteAllTextAsync(config, "{\"ai\":{\"provider\":\"none\"}}");
                 string node = Path.Combine(AppContext.BaseDirectory, "runtime", "node", "node.exe");

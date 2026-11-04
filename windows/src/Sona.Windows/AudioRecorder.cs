@@ -19,9 +19,9 @@ internal sealed class AudioRecorder : IDisposable
     private int ringNext, ringFilled, sinceSpectrum;
     public event Action<Exception?>? UnexpectedStop;
     private bool stopping;
-    private double energy;
-    private long count;
-    public bool HasSpeech => count > 0 && Math.Sqrt(energy / count) > 0.002;
+    // Per-window speech check (Sona.Core.SpeechActivity). The old whole-recording average let room noise through.
+    private SpeechActivity? activity;
+    public bool HasSpeech { get { lock (gate) return activity?.HasSpeech == true; } }
     public static List<(string Id, string Name)> Devices()
     {
         using var enumerator = new MMDeviceEnumerator();
@@ -33,10 +33,11 @@ internal sealed class AudioRecorder : IDisposable
     public void Start(string? deviceId)
     {
         Dispose();
-        stopping = false; energy = 0; count = 0; ringNext = 0; ringFilled = 0; sinceSpectrum = 0;
+        stopping = false; ringNext = 0; ringFilled = 0; sinceSpectrum = 0;
         using var enumerator = new MMDeviceEnumerator();
         device = string.IsNullOrEmpty(deviceId) ? enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Communications) : enumerator.GetDevice(deviceId);
         capture = new WasapiCapture(device);
+        lock (gate) activity = new SpeechActivity(capture.WaveFormat.SampleRate, capture.WaveFormat.Channels);
         memory = new MemoryStream();
         writer = new WaveFileWriter(memory, capture.WaveFormat);
         stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -63,6 +64,7 @@ internal sealed class AudioRecorder : IDisposable
                     bytes == 4 ? BitConverter.ToInt32(e.Buffer, i) / 2147483648f :
                     bytes == 3 ? ((e.Buffer[i] << 8) | (e.Buffer[i + 1] << 16) | (e.Buffer[i + 2] << 24)) / 2147483648f : 0;
                 bool finite = float.IsFinite(sample);
+                activity?.Add(sample); // Every channel, in order; non-finite samples count as zero.
                 if (index % channels == 0)
                 {
                     // First channel only, like the Mac tap.
@@ -72,7 +74,7 @@ internal sealed class AudioRecorder : IDisposable
                     sinceSpectrum++;
                 }
                 if (!finite) continue;
-                peak = Math.Max(peak, Math.Abs(sample)); energy += sample * sample; count++;
+                peak = Math.Max(peak, Math.Abs(sample));
             }
             // One analysis of the newest 1024 frames per 100 ms of audio, the Mac tap cadence.
             if (Spectrum != null && format.SampleRate > 0 && ringFilled == ring.Length && sinceSpectrum >= format.SampleRate / 10)
