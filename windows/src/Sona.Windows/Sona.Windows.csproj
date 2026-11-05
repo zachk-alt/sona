@@ -39,6 +39,8 @@
     <Resource Include="../../assets/Sona.ico" Link="Assets/Sona.ico" />
     <Resource Include="../../../Resources/SonaAppIcon.png" Link="Assets/SonaAppIcon.png" />
     <Resource Include="../../../Resources/MenuIconRecording.png" Link="Assets/MenuIconRecording.png" />
+    <Resource Include="../../../Resources/AILScriptOnDark.png" Link="Assets/AILScriptOnDark.png" />
+    <Resource Include="../../../Resources/AILScriptOnLight.png" Link="Assets/AILScriptOnLight.png" />
     <None Include="../../../bridge/*.mjs;../../../bridge/*.json;../../../bridge/README.md" Exclude="../../../bridge/blender.mjs;../../../bridge/blender-scene.py" Link="bridge/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
     <None Include="../../../bridge/prompts/*.txt" Link="bridge/prompts/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
     <Content Include="$(PkgWhisper_net_Runtime)/build/win-x64/*.dll" Link="runtimes/win-x64/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />

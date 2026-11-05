@@ -257,6 +257,33 @@ internal static class PanelGeometry
     }
 }
 
+/// The panel credit's script logo: Resources/AILScriptOnDark.png and AILScriptOnLight.png, the same files the
+/// Mac panel draws, embedded as WPF resources. Null when a resource cannot load, so the text credit stands in.
+internal static class CreditLogo
+{
+    public const double Height = 14, BaselineRaise = 0.26, RightInset = 14;
+    private static readonly Lazy<BitmapSource?> OnDark = new(() => Load("AILScriptOnDark.png")), OnLight = new(() => Load("AILScriptOnLight.png"));
+
+    public static BitmapSource? For(bool light) => (light ? OnLight : OnDark).Value;
+
+    public static Size Measure(BitmapSource logo) => new(Height * logo.PixelWidth / logo.PixelHeight, Height);
+
+    private static BitmapSource? Load(string name)
+    {
+        try
+        {
+            var image = new BitmapImage();
+            image.BeginInit();
+            image.UriSource = new Uri("pack://application:,,,/Assets/" + name);
+            image.CacheOption = BitmapCacheOption.OnLoad;
+            image.EndInit();
+            image.Freeze();
+            return image.PixelWidth > 0 && image.PixelHeight > 0 ? image : null;
+        }
+        catch (Exception e) when (e is IOException or UriFormatException or NotSupportedException or InvalidOperationException) { return null; }
+    }
+}
+
 /// Draws the panel. The static layers (shadow, bloom, glass, credit, rim and edge light) are computed
 /// once per scale and look; the bars and the rim lights are written into reused bitmaps each frame.
 internal sealed class PanelSurface : FrameworkElement
@@ -607,20 +634,49 @@ internal sealed class PanelSurface : FrameworkElement
         return PanelPaint.ToBitmap(pixels, pixelWidth, pixelHeight, scale);
     }
 
+    // The Mac RecordingCredit: "by" and the one-line Actual Intelligence Labs script logo, right-aligned 14 DIP
+    // inside the glass (the Mac's 12 pt field margin plus its 2 pt text inset). The logo is 14 DIP tall with its
+    // baseline 26% of the way up, so "by" lines up with the bottom of "Actual". Only "by" carries the shadow, as
+    // on the Mac. High contrast draws the logo's shape in the theme's text color. Without the logo resource the
+    // text credit stands in.
     private void AddCredit(double[] pixels)
     {
         var typeface = new Typeface(new FontFamily("Segoe UI"), FontStyles.Normal, FontWeights.SemiBold, FontStretches.Normal);
-        var text = new FormattedText("by Actual Intelligence Labs", CultureInfo.InvariantCulture, FlowDirection.LeftToRight, typeface, 10, LabelBrush(), scale);
-        var brand = new SolidColorBrush(look.HighContrast ? look.Text : Blue); brand.Freeze();
-        text.SetForegroundBrush(brand, 3, 24);
-        var origin = new Point(PanelGeometry.Margin + 282 - text.WidthIncludingTrailingWhitespace, PanelGeometry.Margin + 93 - text.Baseline);
+        double right = PanelGeometry.Margin + PanelGeometry.GlassWidth - CreditLogo.RightInset, baseline = PanelGeometry.Margin + 93;
+        var logo = CreditLogo.For(look.Light);
         var visual = new DrawingVisual();
         TextOptions.SetTextRenderingMode(visual, TextRenderingMode.Grayscale);
-        using (var dc = visual.RenderOpen()) dc.DrawText(text, origin);
-        var target = new RenderTargetBitmap(pixelWidth, pixelHeight, 96 * scale, 96 * scale, PixelFormats.Pbgra32);
-        target.Render(visual);
-        var glyphs = new byte[pixelWidth * pixelHeight * 4];
-        target.CopyPixels(glyphs, pixelWidth * 4, 0);
+        DrawingVisual? mark = null;
+        if (logo != null)
+        {
+            var size = CreditLogo.Measure(logo);
+            var by = new FormattedText("by ", CultureInfo.InvariantCulture, FlowDirection.LeftToRight, typeface, 10, LabelBrush(), scale);
+            var bounds = new Rect(right - size.Width, baseline - (1 - CreditLogo.BaselineRaise) * size.Height, size.Width, size.Height);
+            using (var dc = visual.RenderOpen()) dc.DrawText(by, new Point(bounds.Left - by.WidthIncludingTrailingWhitespace, baseline - by.Baseline));
+            mark = new DrawingVisual();
+            RenderOptions.SetBitmapScalingMode(mark, BitmapScalingMode.HighQuality);
+            using (var dc = mark.RenderOpen())
+            {
+                if (look.HighContrast)
+                {
+                    var shape = new ImageBrush(logo) { Stretch = Stretch.Fill }; shape.Freeze();
+                    var ink = new SolidColorBrush(look.Text); ink.Freeze();
+                    dc.PushOpacityMask(shape);
+                    dc.DrawRectangle(ink, null, bounds);
+                    dc.Pop();
+                }
+                else dc.DrawImage(logo, bounds);
+            }
+        }
+        else
+        {
+            var text = new FormattedText("by Actual Intelligence Labs", CultureInfo.InvariantCulture, FlowDirection.LeftToRight, typeface, 10, LabelBrush(), scale);
+            var brand = new SolidColorBrush(look.HighContrast ? look.Text : Blue); brand.Freeze();
+            text.SetForegroundBrush(brand, 3, 24);
+            using var dc = visual.RenderOpen();
+            dc.DrawText(text, new Point(right - text.WidthIncludingTrailingWhitespace, baseline - text.Baseline));
+        }
+        var glyphs = Rasterize(visual);
         if (!look.HighContrast)
         {
             // NSShadow: black at 0.70 (dark) or 0.12 (light), blur radius 1.5 or 0.5 (sigma 0.75 or 0.25), 0.5 down.
@@ -641,14 +697,30 @@ internal sealed class PanelSurface : FrameworkElement
                 }
             }
         }
+        Composite(pixels, glyphs);
+        if (mark != null) Composite(pixels, Rasterize(mark));
+    }
+
+    private byte[] Rasterize(Visual visual)
+    {
+        var target = new RenderTargetBitmap(pixelWidth, pixelHeight, 96 * scale, 96 * scale, PixelFormats.Pbgra32);
+        target.Render(visual);
+        var bytes = new byte[pixelWidth * pixelHeight * 4];
+        target.CopyPixels(bytes, pixelWidth * 4, 0);
+        return bytes;
+    }
+
+    // Premultiplied BGRA over the RGBA working pixels.
+    private void Composite(double[] pixels, byte[] layer)
+    {
         for (int i = 0; i < pixelWidth * pixelHeight; i++)
         {
-            double a = glyphs[i * 4 + 3] / 255.0;
+            double a = layer[i * 4 + 3] / 255.0;
             if (a <= 0) continue;
             int at = i * 4;
-            pixels[at] = glyphs[i * 4 + 2] / 255.0 + pixels[at] * (1 - a);
-            pixels[at + 1] = glyphs[i * 4 + 1] / 255.0 + pixels[at + 1] * (1 - a);
-            pixels[at + 2] = glyphs[i * 4] / 255.0 + pixels[at + 2] * (1 - a);
+            pixels[at] = layer[i * 4 + 2] / 255.0 + pixels[at] * (1 - a);
+            pixels[at + 1] = layer[i * 4 + 1] / 255.0 + pixels[at + 1] * (1 - a);
+            pixels[at + 2] = layer[i * 4] / 255.0 + pixels[at + 2] * (1 - a);
             pixels[at + 3] = a + pixels[at + 3] * (1 - a);
         }
     }
