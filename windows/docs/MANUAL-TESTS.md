@@ -30,7 +30,7 @@ On actual Windows 11 hardware also test:
 - The chosen dictation shortcut, conflicting registration rollback, same-shortcut finish and rapid tap/repeat. Upgrade with a valid, malformed or conflicting old `commandShortcut` and malformed `assistant` profile: dictation preferences still load, and no second hotkey is registered.
 - With Right Ctrl selected for dictation, tap and hold the former Right Alt command key. No recording or panel should start. The former command chord must also remain available to other apps. German, Polish and US-International AltGr characters and left Alt keep native behavior.
 - Ordinary dictated text pastes using native selection replacement in Notepad, Word and an Electron editor. Selected-text spoken instruction rewriting is not available.
-- Dictionary/snippet add, edit, delete, CRLF signatures, literal expansion with cleanup on/off, unknown config fields, malformed config refusal and failed-save rollback.
+- Vocabulary and saved phrase add, edit, delete, CRLF signatures, literal expansion with cleanup on/off, unknown config fields, malformed config refusal and failed-save rollback.
 - Explicit setup assistance with reviewed unchecked proposals; None and blocked providers must never be called, and failure must leave the manual editor unchanged.
 - Opt-in learning in an initially empty plain TextBox, selected word replacement, pause, candidate review and dismissal. Append text outside the original word, navigate, paste, change fields, disable the setting or wait 15 seconds: no later content read or helper may remain. Verify the helper is terminated if its UIA provider stalls.
 

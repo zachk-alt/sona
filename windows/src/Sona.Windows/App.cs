@@ -469,7 +469,7 @@ internal sealed class App : Application
                 if (Native.GetForegroundWindow() != originalTarget.Window || Native.FocusAt(originalTarget.Window) != (originalTarget.Process, originalTarget.Focus)) break;
                 var result = await session.ObserveAsync();
                 if (cancellation.IsCancellationRequested || !learningLease.Active || !settings.AutoAddToDictionary) break;
-                if (result.Candidate != null) { correction = result.Candidate; Notify("A possible word correction is ready. Review it before adding it to your dictionary."); break; }
+                if (result.Candidate != null) { correction = result.Candidate; Notify("A spelling suggestion is ready. Review it before adding it to your vocabulary."); break; }
                 if (!result.Active) break;
             }
         }
@@ -478,17 +478,17 @@ internal sealed class App : Application
     }
     private void ReviewCorrection()
     {
-        if (correction == null) { Notify("There is no dictionary suggestion to review."); return; }
+        if (correction == null) { Notify("There is no spelling suggestion to review."); return; }
         StopLearning(); var candidate = correction; correction = null;
-        if (MessageBox.Show($"Add “{candidate.Replacement}” to your dictionary?\n\nObserved correction: {candidate.Original} → {candidate.Replacement}\nOnly this word will be saved.", "Review dictionary suggestion", MessageBoxButton.YesNo) != MessageBoxResult.Yes) return;
+        if (MessageBox.Show($"Add this spelling to your vocabulary?\n\n{candidate.Replacement}\n\nObserved correction: {candidate.Original} → {candidate.Replacement}\nOnly this word will be saved.", "Review spelling suggestion", MessageBoxButton.YesNo) != MessageBoxResult.Yes) return;
         try
         {
             var document = JsonNode.Parse(File.ReadAllText(AiPath))?.AsObject() ?? throw new InvalidDataException();
             var words = document["vocabulary"]?.AsArray().Select(v => v!.GetValue<string>()) ?? Enumerable.Empty<string>();
             document["vocabulary"] = JsonSerializer.SerializeToNode(FeatureConfig.Vocabulary(words.Append(candidate.Replacement)));
-            FeatureConfig.WriteAtomic(AiPath, document); Notify("Word added. Manage your dictionary in Settings.");
+            FeatureConfig.WriteAtomic(AiPath, document); Notify("Spelling added. Manage your vocabulary in Settings.");
         }
-        catch { Notify("The dictionary could not be saved. Open Settings to review it."); }
+        catch { Notify("The vocabulary could not be saved. Open Settings to review it."); }
     }
     private async Task QuitAsync()
     {

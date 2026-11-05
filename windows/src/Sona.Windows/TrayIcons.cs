@@ -38,7 +38,7 @@ internal static class TrayMenu
         var menu = new Forms.ContextMenuStrip();
         menu.Items.Add("Settings…", null, (_, _) => actions.Settings());
         menu.Items.Add("Copy last dictation", null, (_, _) => actions.CopyLast());
-        menu.Items.Add("Review dictionary suggestion…", null, (_, _) => actions.ReviewSpelling());
+        menu.Items.Add("Review spelling suggestion…", null, (_, _) => actions.ReviewSpelling());
         menu.Items.Add("Review last dictation…", null, (_, _) => actions.ReviewLast());
         menu.Items.Add("Cancel recording or processing", null, (_, _) => actions.Cancel());
         menu.Items.Add(new Forms.ToolStripSeparator());

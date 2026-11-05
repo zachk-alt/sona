@@ -76,6 +76,9 @@ internal static class WindowsSelfTest
                     var labels = menu.Items.OfType<System.Windows.Forms.ToolStripMenuItem>().Select(item => item.Text ?? "").ToArray();
                     checks["tray_menu_items"] = labels;
                     Check("tray_menu_about", labels.Contains(TrayMenu.AboutTitle) && Array.IndexOf(labels, TrayMenu.AboutTitle) == labels.Length - 2);
+                    // The Mac's words: "spelling suggestion" and "vocabulary", never "dictionary" or "snippet".
+                    Check("tray_menu_mac_wording", labels.Contains("Review spelling suggestion…")
+                        && !labels.Any(label => label.Contains("ictionary", StringComparison.Ordinal) || label.Contains("nippet", StringComparison.Ordinal)));
                     TrayMenu.ApplyTheme(menu, light: false);
                     var darkFill = (menu.Renderer as System.Windows.Forms.ToolStripProfessionalRenderer)?.ColorTable.ToolStripDropDownBackground ?? System.Drawing.Color.White;
                     Check("tray_menu_dark_theme", SystemParameters.HighContrast
