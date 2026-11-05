@@ -1,6 +1,6 @@
 # Sona for Windows
 
-A native Windows tray dictation client. Tap your chosen shortcut to record, tap again to finish, and Sona transcribes locally: English with NVIDIA Parakeet TDT 0.6B v2 through sherpa-onnx, with Whisper as the backup, and every other language with Whisper. Optional cleanup uses the shared Sona AI bridge and an account or API configuration you choose.
+A native Windows tray dictation client. Tap your chosen shortcut to record and tap again to finish, or hold it while you talk, and Sona transcribes locally: English with NVIDIA Parakeet TDT 0.6B v2 through sherpa-onnx, with Whisper as the backup, and every other language with Whisper. Optional cleanup uses the shared Sona AI bridge and an account or API configuration you choose.
 
 This release targets **Windows 11 x64**. It does not support Windows 10, Windows on ARM, or UWP/mobile. The Windows app is separate from the macOS AppKit client.
 
@@ -28,9 +28,11 @@ In **Settings > Privacy & security > Microphone**, enable **Microphone access** 
 
 ## Shortcuts and insertion
 
-Choose a single key or a modifier chord in settings. The default is Ctrl + Alt + Space. A bare character key is reserved while Sona runs. Left/right Ctrl, Alt, or Shift can be selected as a single short tap. A modifier hold longer than 650 ms or a modifier combined with another key is ignored. F12 and the Windows key alone are reserved. Windows may reject an already registered chord; choose another when prompted.
+Choose a single key or a modifier chord in settings. The default is Ctrl + Alt + Space. A bare character key is reserved while Sona runs. Left/right Ctrl, Alt, or Shift can be selected on its own.
 
-Ordinary keys/chords remain reserved with Windows `RegisterHotKey`. Dictation keeps its existing repeat-suppressed trigger. For a modifier shortcut, the callback observes only the selected key and a boolean indicating chord use. It never stores or logs other key identities or typed text. Native modifier/chord behavior passes through.
+The gesture matches the Mac. Pressing the shortcut starts recording. Releasing it after half a second or more finishes (hold to talk). A shorter tap keeps recording hands-free until the next tap. Pressing any other key while holding the shortcut cancels that dictation, so the key still works in ordinary shortcuts; during a hands-free recording such a shortcut leaves the recording running. Letting go of a chord's modifiers before its key still finishes. F12 and the Windows key alone are reserved. Windows may reject an already registered chord; choose another when prompted.
+
+Ordinary keys/chords remain reserved with Windows `RegisterHotKey`. A low-level keyboard hook on its own thread sees the shortcut's press and release, for chords and modifiers alike, and only whether some other key went down. It never stores or logs other key identities or typed text, and it never blocks a key. Native modifier/chord behavior passes through. If Windows drops the hook, a chord still starts and stops dictation as a tap until the hook is installed again.
 
 The recording and processing panel matches the Mac panel: a 300 x 104 rounded glass (26 DIP corners) with a white edge light, a soft drop shadow and blue glow, 75 blue bars that follow 48 voice bands (low on the left, high on the right), and the "by Actual Intelligence Labs" credit. While Sona transcribes, the bars become a travelling wave and two lights race around the glass edge. It appears near the top right of the work area on the monitor of the window you are dictating into, and fades out with a short lift when done. When automatic paste is refused, the panel says where the text is for three seconds before it fades. It is a nonactivating, click-through layered WPF window drawn entirely by Sona, so it never takes focus from the target field and never catches a click meant for the window underneath. Like the Mac panel, it shows in screenshots and screen sharing. It follows the Windows app theme (dark or light), turns the translucent glass edge opaque when Transparency effects are off, drops the lift when animation effects are off, and uses system colors in High Contrast. The original Sona sound cues play at start and stop.
 

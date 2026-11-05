@@ -50,13 +50,13 @@ internal sealed class SettingsWindow : Window
         var stack = new StackPanel { Margin = new Thickness(30, 24, 30, 28) };
         Content = new ScrollViewer { Content = stack, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         stack.Children.Add(new TextBlock { Text = "Your voice. Your shortcut.", FontSize = 27, FontWeight = FontWeights.SemiBold });
-        stack.Children.Add(Description("Tap once to record, tap again to finish. Sona transcribes on this PC and pastes only if the original text field still has focus."));
+        stack.Children.Add(Description("Tap to start, tap again to finish. Or hold to talk. Sona transcribes on this PC and pastes only if the original text field still has focus."));
         Label(stack, "Keyboard shortcut");
         shortcutButton.Content = HotkeyService.Label(selectedShortcut); shortcutButton.Padding = new Thickness(14, 9, 14, 9);
         shortcutButton.Click += (_, _) => { capturing = true; chordCaptured = false; shortcutButton.Content = "Press a key or chord…"; shortcutButton.Focus(); };
         shortcutButton.PreviewKeyDown += CaptureDown; shortcutButton.PreviewKeyUp += CaptureUp;
         stack.Children.Add(shortcutButton);
-        stack.Children.Add(Description("Click to choose a single key or chord. A bare letter is reserved while Sona runs. A modifier tap must be short; normal modifier shortcuts still work. F12 and Windows-only keys are reserved."));
+        stack.Children.Add(Description("Click to choose a single key or chord. A bare letter is reserved while Sona runs. A modifier works alone; using it in a normal shortcut cancels that dictation. F12 and Windows-only keys are reserved."));
         Label(stack, "Microphone"); devices.Items.Add(new DeviceOption(null, "Windows default communications microphone"));
         try { foreach (var d in AudioRecorder.Devices()) devices.Items.Add(new DeviceOption(d.Id, d.Name)); }
         catch { status.Text = "No microphone is available. Check Windows sound and privacy settings."; }

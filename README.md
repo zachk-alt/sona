@@ -69,7 +69,7 @@ Sona does not auto-update or require installing a new Sona version to keep using
 
 ## Using Sona
 
-- Tap your shortcut to start and tap again to finish. Mac also supports holding and releasing it.
+- Tap your shortcut to start and tap again to finish, or hold it while you talk and let go to finish. Pressing another key during the hold cancels that dictation.
 - Change the shortcut from the Sona menu on Mac or Settings on Windows. A single letter reserves that key while Sona runs. Choose a chord or function key if you want to keep normal typing. Operating-system-reserved combinations cannot all be intercepted.
 - Speak while the waveform is active. The orbit and loading wave run during processing. The panel remains through insertion and dismisses gently.
 - Keep your original text field focused until insertion. If it changes, recover the result from the app's copy action rather than pasting into an unintended field.
