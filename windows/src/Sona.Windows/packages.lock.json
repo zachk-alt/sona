@@ -142,7 +142,10 @@
         "contentHash": "Ut5tZyCUwXMVdThoLvdvQ7GyLwjRMreR/p3LuMJvRiXidQ2AXxx2Tv8UOGtMxvL395AC3+IkHdN/kMfd+EPSEw=="
       },
       "sona.core": {
-        "type": "Project"
+        "type": "Project",
+        "dependencies": {
+          "NAudio.Core": "[2.4.0, )"
+        }
       }
     },
     "net8.0-windows7.0/win-x64": {

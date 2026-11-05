@@ -294,13 +294,15 @@ internal sealed class App : Application
             ShowPanel(() => panel?.Processing()); if (tray != null) tray.Text = "Sona: processing";
             var audio = await recorder.StopAsync();
             try { stopCue?.Play(); } catch { }
-            bool audible = recorder.HasSpeech; recorder.Dispose();
-            if (!audible || audio.Length < 4000) { sessionFailure = "No speech was detected."; return; }
+            recorder.Dispose();
+            // One conversion, off the UI thread: the speech check judges exactly the 16 kHz mono the engine hears.
+            var samples = await Task.Run(() => SpeechAudio.Mono16k(audio));
+            if (!SpeechActivity.Detect(samples, SpeechAudio.SampleRate)) { sessionFailure = "No speech was detected."; return; }
             operation!.CancelAfter(TimeSpan.FromSeconds(120));
             var speech = activeModel ?? SpeechModels.For(settings.Language);
             bool onParakeet = SpeechEngines.ForDictation(settings.Language, parakeetVerified) == SpeechEngine.Parakeet;
             var route = new SpeechRoute(ModelPath(speech), SpeechModels.WhisperLanguage(speech, settings.Language), onParakeet ? ParakeetFolder : null);
-            var text = (await transcriber.TranscribeAsync(audio, route, operation.Token)).Text;
+            var text = (await transcriber.TranscribeAsync(samples, route, operation.Token)).Text;
             if (string.IsNullOrWhiteSpace(text)) { sessionFailure = "No speech was detected."; return; }
             // Snippets run inside the bridge before optional cleanup, including when cleanup is off.
             string raw = text;

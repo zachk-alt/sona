@@ -1,6 +1,4 @@
 using System.Text;
-using NAudio.Wave;
-using NAudio.Wave.SampleProviders;
 using Whisper.net;
 using Whisper.net.LibraryLoader;
 using Sona.Core;
@@ -21,19 +19,26 @@ internal sealed class Transcriber : IDisposable
     private readonly ParakeetHealth parakeetHealth = new();
     public ParakeetHealth Health => parakeetHealth;
 
+    /// A WAV recording, through the one conversion both engines share.
+    public Task<Transcript> TranscribeAsync(byte[] recording, SpeechRoute route, CancellationToken cancellation) =>
+        TranscribeAsync(SpeechAudio.Mono16k(recording), route, cancellation);
+    public Task<string> TranscribeAsync(byte[] recording, string modelPath, string language, CancellationToken cancellation) =>
+        TranscribeAsync(SpeechAudio.Mono16k(recording), modelPath, language, cancellation);
+
+    /// Both engines hear the same 16 kHz mono samples (SpeechAudio.Mono16k).
     /// Parakeet first when the route has it and it has not failed; on a load or decode failure that dictation runs on
     /// Whisper. Failures are logged as fixed codes with the exception type only, never text.
-    public async Task<Transcript> TranscribeAsync(byte[] recording, SpeechRoute route, CancellationToken cancellation)
+    public async Task<Transcript> TranscribeAsync(float[] samples, SpeechRoute route, CancellationToken cancellation)
     {
         if (route.ParakeetFolder != null && parakeetHealth.ShouldTry(route.ParakeetFolder))
         {
-            try { return new(await TranscribeParakeetAsync(recording, route.ParakeetFolder, cancellation), SpeechEngine.Parakeet); }
+            try { return new(await TranscribeParakeetAsync(samples, route.ParakeetFolder, cancellation), SpeechEngine.Parakeet); }
             catch (Exception e) when (SpeechEngines.FallBackToWhisper(e, cancellation.IsCancellationRequested))
             {
                 App.Log(e is ParakeetLoadException ? SpeechEngines.ParakeetLoadFailed : SpeechEngines.ParakeetDecodeFailed, e.InnerException ?? e);
             }
         }
-        return new(await TranscribeAsync(recording, route.WhisperModelPath, route.WhisperLanguage, cancellation), SpeechEngine.Whisper);
+        return new(await TranscribeAsync(samples, route.WhisperModelPath, route.WhisperLanguage, cancellation), SpeechEngine.Whisper);
     }
 
     /// Loads Parakeet ahead of the first dictation so that dictation does not wait for it. A failure is logged and
@@ -55,9 +60,8 @@ internal sealed class Transcriber : IDisposable
         finally { parakeetGate.Release(); }
     }
 
-    private async Task<string> TranscribeParakeetAsync(byte[] recording, string folder, CancellationToken cancellation)
+    private async Task<string> TranscribeParakeetAsync(float[] samples, string folder, CancellationToken cancellation)
     {
-        float[] samples = await Task.Run(() => Mono16k(recording), cancellation);
         await parakeetGate.WaitAsync(cancellation);
         var decode = Task.Run(() =>
         {
@@ -88,29 +92,13 @@ internal sealed class Transcriber : IDisposable
         catch (Exception e) { parakeetHealth.LoadFailed(folder); throw new ParakeetLoadException(e); }
     }
 
-    /// The recording as 16 kHz mono float samples, through the same conversion Whisper's path uses.
-    internal static float[] Mono16k(byte[] recording)
-    {
-        using var raw = new MemoryStream(recording, false);
-        using var reader = new WaveFileReader(raw);
-        ISampleProvider audio = reader.ToSampleProvider();
-        if (audio.WaveFormat.Channels == 2) audio = new StereoToMonoSampleProvider(audio) { LeftVolume = 0.5f, RightVolume = 0.5f };
-        if (audio.WaveFormat.Channels != 1) throw new NotSupportedException("Choose a mono or stereo microphone in Windows sound settings.");
-        if (audio.WaveFormat.SampleRate != ParakeetRecognizer.SampleRate) audio = new WdlResamplingSampleProvider(audio, ParakeetRecognizer.SampleRate);
-        var samples = new List<float>(ParakeetRecognizer.SampleRate * 30);
-        var buffer = new float[ParakeetRecognizer.SampleRate];
-        int read;
-        while ((read = audio.Read(buffer, 0, buffer.Length)) > 0) samples.AddRange(new ArraySegment<float>(buffer, 0, read));
-        return samples.ToArray();
-    }
-
     private WhisperFactory? factory;
     private string? factoryPath;
     // A processor whose dispose did not finish may still run on its factory. Such a factory is kept alive,
     // never freed under it, when a language change selects another model file.
     private bool processorMayLinger;
     private readonly List<WhisperFactory> retained = [];
-    public Task<string> TranscribeAsync(byte[] recording, string modelPath, string language, CancellationToken cancellation) => Task.Run(async () =>
+    public Task<string> TranscribeAsync(float[] samples, string modelPath, string language, CancellationToken cancellation) => Task.Run(async () =>
     {
         RuntimeOptions.RuntimeLibraryOrder = [RuntimeLibrary.Cpu, RuntimeLibrary.CpuNoAvx];
         if (factory != null && !string.Equals(factoryPath, modelPath, StringComparison.OrdinalIgnoreCase))
@@ -120,21 +108,12 @@ internal sealed class Transcriber : IDisposable
         }
         factory ??= WhisperFactory.FromPath(modelPath);
         factoryPath = modelPath;
-        using var raw = new MemoryStream(recording, false);
-        using var reader = new WaveFileReader(raw);
-        ISampleProvider audio = reader.ToSampleProvider();
-        if (audio.WaveFormat.Channels == 2) audio = new StereoToMonoSampleProvider(audio) { LeftVolume = 0.5f, RightVolume = 0.5f };
-        if (audio.WaveFormat.Channels != 1) throw new NotSupportedException("Choose a mono or stereo microphone in Windows sound settings.");
-        if (audio.WaveFormat.SampleRate != 16000) audio = new WdlResamplingSampleProvider(audio, 16000);
-        using var wave = new MemoryStream();
-        WaveFileWriter.WriteWavFileToStream(wave, audio.ToWaveProvider16());
-        wave.Position = 0;
         var processor = factory.CreateBuilder().WithLanguage(language).WithNoContext()
             .WithThreads(Threads).Build();
         try
         {
             var text = new StringBuilder();
-            await foreach (var segment in processor.ProcessAsync(wave, cancellation)) text.Append(segment.Text);
+            await foreach (var segment in processor.ProcessAsync(samples, cancellation)) text.Append(segment.Text);
             return text.ToString().Trim();
         }
         catch (Exception) when (cancellation.IsCancellationRequested)

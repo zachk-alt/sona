@@ -550,6 +550,58 @@ var withNan = Mix(Syllables(Rate, 2.0, -22), PinkNoise(Rate * 2, -45)); withNan[
 Check(SpeechActivity.Detect(withNan, Rate), "non-finite samples count as zero without breaking the check");
 var oneSecond = new SpeechActivity(Rate, 2); for (int i = 0; i < Rate * 2; i++) oneSecond.Add(0);
 Check(oneSecond.WindowCount == 33, "30 ms windows count frames, not interleaved samples");
+
+// Speech audio conversion (parity P-F1, P-F8, P-F21): one sinc resample to 16 kHz mono for both engines and the speech check.
+float[] Tone(double hz, int rate, double seconds, double amplitude = 0.5) { var x = new float[(int)(rate * seconds)]; for (int i = 0; i < x.Length; i++) x[i] = (float)(amplitude * Math.Sin(2 * Math.PI * hz * i / rate)); return x; }
+// Level of one frequency over the middle second of a 16 kHz signal, in dB relative to amplitude 0.5.
+double ToneDb(float[] x, double hz)
+{
+    int start = x.Length / 2 - 8000, length = 16000;
+    double k = 2 * Math.PI * hz / 16000, c = 2 * Math.Cos(k), s1 = 0, s2 = 0;
+    for (int i = start; i < start + length; i++) { double s0 = x[i] + c * s1 - s2; s2 = s1; s1 = s0; }
+    double amplitude = Math.Sqrt(Math.Max(s1 * s1 + s2 * s2 - c * s1 * s2, 0)) / length * 2;
+    return 20 * Math.Log10(Math.Max(amplitude, 1e-12) / 0.5);
+}
+foreach (int rate in new[] { 48000, 44100 })
+{
+    double worstPass = 0, worstAlias = -200;
+    foreach (double hz in new[] { 100.0, 250, 500, 1000, 2000, 3000, 4000, 5000, 6000, 6500, 7000 })
+        worstPass = Math.Max(worstPass, Math.Abs(ToneDb(SpeechAudio.Resample(Tone(hz, rate, 3), rate), hz)));
+    foreach (double hz in new[] { 9000.0, 10000, 11000, 12000, 13000, 14000 })
+        worstAlias = Math.Max(worstAlias, ToneDb(SpeechAudio.Resample(Tone(hz, rate, 3), rate), 16000 - hz));
+    Check(worstPass <= 0.5, $"{rate} Hz to 16 kHz is within 0.5 dB from 100 Hz to 7 kHz (worst {worstPass:F2} dB)");
+    Check(worstAlias < -40, $"{rate} Hz to 16 kHz keeps 9 to 14 kHz aliases below -40 dB (worst {worstAlias:F1} dB)");
+    foreach (int length in new[] { rate * 3 / 2 + 7, 1, 0, rate / 100 })
+        Check(SpeechAudio.Resample(new float[length], rate).Length == (int)Math.Round(length * 16000.0 / rate), $"{rate} Hz input of {length} samples gives the exact 16 kHz length");
+}
+var impulse = new float[48000]; impulse[24000] = 1;
+var moved = SpeechAudio.Resample(impulse, 48000);
+Check(Array.IndexOf(moved, moved.Max()) == 8000, "the resample adds no delay, so the last word is not cut");
+Check(SpeechAudio.Resample(Tone(440, 16000, 1), 16000).SequenceEqual(Tone(440, 16000, 1)), "16 kHz input passes through unchanged");
+float[] Channels(params float[][] each) { var x = new float[each[0].Length * each.Length]; for (int i = 0; i < each[0].Length; i++) for (int c = 0; c < each.Length; c++) x[i * each.Length + c] = each[c][i]; return x; }
+var tone1k = Tone(1000, 48000, 2); var silent = new float[tone1k.Length];
+Check(Math.Abs(ToneDb(SpeechAudio.Mono16k(tone1k, 48000, 1), 1000)) < 0.1, "mono input keeps its level");
+Check(Math.Abs(ToneDb(SpeechAudio.Mono16k(Channels(tone1k, tone1k), 48000, 2), 1000)) < 0.1, "stereo with the same signal on both channels keeps its level");
+Check(Math.Abs(ToneDb(SpeechAudio.Mono16k(Channels(tone1k, silent), 48000, 2), 1000) + 6.02) < 0.1, "stereo keeps the 0.5/0.5 mix");
+Check(Math.Abs(ToneDb(SpeechAudio.Mono16k(Channels(tone1k, tone1k, tone1k, tone1k), 48000, 4), 1000)) < 0.1, "a 4-channel microphone is mixed to mono, not refused");
+Check(Math.Abs(ToneDb(SpeechAudio.Mono16k(Channels(silent, tone1k, silent, silent), 48000, 4), 1000) + 12.04) < 0.1, "4 channels are averaged, one live input at a quarter level");
+Check(SpeechAudio.Mono16k(Channels(tone1k, tone1k, tone1k, tone1k), 48000, 4).Length == 32000, "4-channel input gives the exact 16 kHz mono length");
+var badSample = Channels(tone1k, tone1k); badSample[1001] = float.NaN; badSample[3001] = float.PositiveInfinity;
+Check(SpeechAudio.Mono16k(badSample, 48000, 2).All(float.IsFinite), "non-finite samples never spread through the resampler");
+byte[] Wav(NAudio.Wave.WaveFormat format, float[] interleaved)
+{
+    var memory = new MemoryStream();
+    using (var writer = new NAudio.Wave.WaveFileWriter(memory, format)) foreach (var v in interleaved) writer.WriteSample(v);
+    return memory.ToArray();
+}
+var fourWav = SpeechAudio.Mono16k(Wav(NAudio.Wave.WaveFormat.CreateIeeeFloatWaveFormat(48000, 4), Channels(silent, tone1k, silent, silent)));
+Check(fourWav.Length == 32000 && Math.Abs(ToneDb(fourWav, 1000) + 12.04) < 0.1, "a 4-channel 48 kHz float WAV becomes 16 kHz mono at the right level");
+var stereoWav = SpeechAudio.Mono16k(Wav(new NAudio.Wave.WaveFormat(44100, 16, 2), Channels(Tone(1000, 44100, 2), Tone(1000, 44100, 2))));
+Check(stereoWav.Length == 32000 && Math.Abs(ToneDb(stereoWav, 1000)) < 0.1, "a 16-bit stereo 44.1 kHz WAV becomes 16 kHz mono at the right level");
+// High hiss above 8 kHz is not what the engine hears, so it no longer raises the floor the speech check measures.
+float[] Hiss(int n, double dbfs) { var noise = WhiteNoise(n, dbfs); var high = new float[n]; for (int i = 1; i < n - 1; i++) high[i] = (noise[i] - 0.5f * (noise[i - 1] + noise[i + 1])) * 0.8165f; return high; }
+var hissy = Mix(Syllables(Rate, 2.0, -40), Hiss(Rate * 2, -30));
+Check(SpeechActivity.Detect(SpeechAudio.Mono16k(hissy, Rate, 1), 16000), "soft speech under loud hiss above 8 kHz is speech on the 16 kHz mono the engine hears");
 Console.WriteLine($"{tests} checks passed.");
 return 0;
 

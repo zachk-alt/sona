@@ -19,9 +19,6 @@ internal sealed class AudioRecorder : IDisposable
     private int ringNext, ringFilled, sinceSpectrum;
     public event Action<Exception?>? UnexpectedStop;
     private bool stopping;
-    // Per-window speech check (Sona.Core.SpeechActivity). The old whole-recording average let room noise through.
-    private SpeechActivity? activity;
-    public bool HasSpeech { get { lock (gate) return activity?.HasSpeech == true; } }
     public static List<(string Id, string Name)> Devices()
     {
         using var enumerator = new MMDeviceEnumerator();
@@ -37,7 +34,6 @@ internal sealed class AudioRecorder : IDisposable
         using var enumerator = new MMDeviceEnumerator();
         device = string.IsNullOrEmpty(deviceId) ? enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Communications) : enumerator.GetDevice(deviceId);
         capture = new WasapiCapture(device);
-        lock (gate) activity = new SpeechActivity(capture.WaveFormat.SampleRate, capture.WaveFormat.Channels);
         memory = new MemoryStream();
         writer = new WaveFileWriter(memory, capture.WaveFormat);
         stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -64,7 +60,6 @@ internal sealed class AudioRecorder : IDisposable
                     bytes == 4 ? BitConverter.ToInt32(e.Buffer, i) / 2147483648f :
                     bytes == 3 ? ((e.Buffer[i] << 8) | (e.Buffer[i + 1] << 16) | (e.Buffer[i + 2] << 24)) / 2147483648f : 0;
                 bool finite = float.IsFinite(sample);
-                activity?.Add(sample); // Every channel, in order; non-finite samples count as zero.
                 if (index % channels == 0)
                 {
                     // First channel only, like the Mac tap.
