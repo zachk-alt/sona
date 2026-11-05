@@ -7,6 +7,14 @@ public static class DictationDeadlines
     /// so a slow microphone (a Bluetooth headset switching profile) never leaves a press with no feedback.
     public static readonly TimeSpan FirstAudio = TimeSpan.FromSeconds(1.5);
 
+    /// Press to microphone open, the Mac's micDelay. The shortcut can be an ordinary modifier, so a press that becomes
+    /// Ctrl + C inside this is discarded before the microphone opens, the chime plays or a notice shows. The text
+    /// field check runs inside it.
+    public static readonly TimeSpan MicrophoneDelay = TimeSpan.FromMilliseconds(150);
+    /// What is left of MicrophoneDelay at now, for a press at pressedAt (milliseconds on one clock).
+    public static TimeSpan MicrophoneWait(long pressedAt, long now) =>
+        TimeSpan.FromMilliseconds(Math.Clamp(MicrophoneDelay.TotalMilliseconds - (now - pressedAt), 0, MicrophoneDelay.TotalMilliseconds));
+
     /// Audio still captured after the stop press before the microphone closes. The press lands on or just after the
     /// last word, and WasapiCapture drops the packet it has not read yet when it stops, so a quick tap could clip the
     /// final consonant. The Mac's stopGrace; its audit found 100 to 150 ms enough.

@@ -78,6 +78,8 @@ Check(gesture.Registered() == None, "a declined press's late WM_HOTKEY is not ta
 gesture = new();
 gesture.Down(0, true); gesture.Registered();
 Check(gesture.Registered() == Unlatch && !gesture.Held, "missed release then missed press finishes the held dictation");
+Check(DictationDeadlines.MicrophoneWait(1000, 1000) == TimeSpan.FromMilliseconds(150) && DictationDeadlines.MicrophoneWait(1000, 1100) == TimeSpan.FromMilliseconds(50), "microphone opens 150 ms after the press, like the Mac");
+Check(DictationDeadlines.MicrophoneWait(1000, 1400) == TimeSpan.Zero && DictationDeadlines.MicrophoneWait(1000, 900) == TimeSpan.FromMilliseconds(150), "a slow field check waits no more, and the wait is bounded");
 bool HeldOnly(int[] keys, int key) => keys.Contains(key);
 var rightCtrl = new Shortcut(0xA3, 0);
 Check(DictationGesture.Clean(rightCtrl, key => HeldOnly([0xA3], key)), "modifier alone is clean");

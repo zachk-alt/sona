@@ -198,7 +198,7 @@ internal static class WindowsSelfTest
                 var triggered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                 int dictationActivations = 0;
                 var gestures = new List<DictationGestureEvent>();
-                hotkey.Gesture += gesture =>
+                hotkey.Gesture += (gesture, _) =>
                 {
                     gestures.Add(gesture);
                     if (gesture == DictationGestureEvent.Begin) { dictationActivations++; triggered.TrySetResult(); }

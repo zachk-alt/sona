@@ -24,7 +24,8 @@ internal sealed class HotkeyService : IDisposable
     private readonly object gate = new();
     private DictationGesture gesture = new();
     private int epoch;
-    public event Action<DictationGestureEvent>? Gesture;
+    /// The gesture, and when its key moved (Environment.TickCount64).
+    public event Action<DictationGestureEvent, long>? Gesture;
 
     public HotkeyService(bool allowSyntheticForTests = false)
     {
@@ -75,7 +76,7 @@ internal sealed class HotkeyService : IDisposable
         {
             handled = true;
             // A press the hook did not see means Windows dropped the hook.
-            if (enabled && Route(null, Step.Registered, 0, false)) Rearm();
+            if (enabled && Route(null, Step.Registered, Environment.TickCount64, false)) Rearm();
         }
         return 0;
     }
@@ -99,7 +100,7 @@ internal sealed class HotkeyService : IDisposable
             dispatcher.BeginInvoke(() =>
             {
                 bool current; lock (gate) current = expected == epoch;
-                if (enabled && current) Gesture?.Invoke(result);
+                if (enabled && current) Gesture?.Invoke(result, milliseconds);
             });
             return true;
         }
