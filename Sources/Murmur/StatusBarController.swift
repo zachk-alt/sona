@@ -344,15 +344,39 @@ final class StatusBarController {
 
     func showError(_ message: String) {
         showRecording()
+        // Nothing is recording while a message shows, as on Windows.
+        activityHighlighted = false
+        item.button?.image = idleIcon
         wave.isHidden = true
         let label = NSTextField(wrappingLabelWithString: message)
         label.font = .systemFont(ofSize:13,weight:.medium); label.alignment = .center
         label.textColor = .labelColor
         label.frame = wave.frame.insetBy(dx:12,dy:12)
         wave.superview?.addSubview(label); errorLabel = label
+        announce(message, from: label)
         DispatchQueue.main.asyncAfter(deadline:.now()+3) { [weak self, weak label] in
             guard let self, let label, self.errorLabel === label else { return }
             label.removeFromSuperview(); self.errorLabel = nil; self.wave.isHidden = false; self.showIdle()
+        }
+    }
+
+    /// The last panel message handed to VoiceOver, for the self-tests.
+    private(set) var lastAnnouncement: String?
+
+    /// The panel never takes focus, so VoiceOver would not read its message.
+    /// An announcement reads it without activating Sona, as Narrator reads
+    /// the Windows panel.
+    private func announce(_ message: String, from element: NSView) {
+        lastAnnouncement = message
+        guard !Self.headless else { return }
+        do {
+            try catchingFrameworkException {
+                NSAccessibility.post(element: element, notification: .announcementRequested,
+                                     userInfo: [.announcement: message,
+                                                .priority: NSAccessibilityPriorityLevel.high.rawValue])
+            }
+        } catch {
+            Log.write("panel: announcement raised \(error)")
         }
     }
 
