@@ -129,6 +129,71 @@ func testCaptureConverter() {
     }
 }
 
+/// Multi-channel microphones (P-F8, P-F9). AVAudioConverter alone turned a
+/// discrete or unknown layout into digital silence and kept only channel 1
+/// of a layout-free source; every channel is now averaged, as on Windows.
+func testChannelMix() {
+    let speech = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
+    let apple = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true)!
+    func source(_ channels: AVAudioChannelCount, _ layout: String, interleaved: Bool = false) -> AVAudioFormat {
+        switch layout {
+        case "discrete":
+            return AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48000, interleaved: interleaved,
+                                 channelLayout: AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_DiscreteInOrder | UInt32(channels))!)
+        case "unknown":
+            return AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48000, interleaved: interleaved,
+                                 channelLayout: AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_Unknown | UInt32(channels))!)
+        default:
+            return AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48000, channels: channels, interleaved: interleaved)!
+        }
+    }
+    /// Level in dB of the converted 1 kHz tone against the same tone on a mono mic.
+    func level(_ format: AVAudioFormat, toneOn live: Int, to target: AVAudioFormat) -> Double? {
+        guard let converter = try? CaptureConverter(from: format, to: target) else { return nil }
+        let channels = Int(format.channelCount)
+        var out: [Float] = []
+        var k = 0
+        for _ in 0..<10 {
+            let b = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4800)!
+            b.frameLength = 4800
+            for i in 0..<4800 {
+                let value = Float(0.5 * sin(2 * .pi * 1000 * Double(k) / 48000))
+                for channel in 0..<channels {
+                    let sample = channel == live ? value : 0
+                    if format.isInterleaved { b.floatChannelData![0][i * channels + channel] = sample }
+                    else { b.floatChannelData![channel][i] = sample }
+                }
+                k += 1
+            }
+            guard let o = converter.convert(b) else { continue }
+            if let f = o.floatChannelData?[0] { out += UnsafeBufferPointer(start: f, count: Int(o.frameLength)) }
+            else if let s = o.int16ChannelData?[0] { out += UnsafeBufferPointer(start: s, count: Int(o.frameLength)).map { Float($0) / 32768 } }
+        }
+        guard out.count > 8000 else { return nil }
+        let tail = out.suffix(8000)
+        let rms = sqrt(tail.reduce(0) { $0 + Double($1 * $1) } / Double(tail.count))
+        return 20 * log10(max(rms, 1e-12) / (0.5 / sqrt(2)))
+    }
+    // AVAudioFormat needs a layout past two channels.
+    for (layout, counts) in [("discrete", [2, 4]), ("unknown", [2, 4]), ("none", [2])] as [(String, [AVAudioChannelCount])] {
+        for channels in counts {
+            let expected = -20 * log10(Double(channels))
+            for live in 0..<Int(channels) {
+                for target in [speech, apple] {
+                    let got = level(source(channels, layout), toneOn: live, to: target)
+                    check(got.map { abs($0 - expected) < 0.5 } == true,
+                          String(format: "%@ layout, %d channels, tone on input %d: mono at %.1f dB (got %@)", layout, channels, live + 1,
+                                 expected, got.map { String(format: "%.1f dB", $0) } ?? "nothing"))
+                }
+            }
+        }
+    }
+    let interleaved = level(source(2, "discrete", interleaved: true), toneOn: 1, to: speech)
+    check(interleaved.map { abs($0 + 6.02) < 0.5 } == true, "Interleaved stereo mixes the same way (got \(String(describing: interleaved)))")
+    let mono = level(source(1, "none"), toneOn: 0, to: speech)
+    check(mono.map { abs($0) < 0.5 } == true, "A mono mic passes at full level (got \(String(describing: mono)))")
+}
+
 
 // MARK: - Debug text log (M7) and session metrics (M6)
 
@@ -285,6 +350,7 @@ struct DictationPipelineMain {
     static func main() {
         testTranscriptAssembler()
         testCaptureConverter()
+        testChannelMix()
         testDebugTextLog()
         testDebugTextLogConfig()
         testDebugTextLogReadsConfigEachWrite()

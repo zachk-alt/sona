@@ -71,6 +71,15 @@ import ApplicationServices
         try require(bar.isActivityHighlighted, "Processing lost the blue activity icon.")
         try visibleGlass(panel)
         try unchanged(panel)
+        // A panel message keeps the same nonactivating surface, hands its
+        // words to VoiceOver without activating Sona and shows the idle icon.
+        bar.showError("No speech was detected.")
+        try require(panel.windowNumber == identity && panel.isVisible && panel.frame == recordingFrame,
+                    "A panel message replaced, hid or moved the recording surface.")
+        try require(bar.lastAnnouncement == "No speech was detected.", "A panel message was not announced to VoiceOver.")
+        try require(!bar.isActivityHighlighted, "A panel message kept the blue activity icon.")
+        try await Task.sleep(for: .milliseconds(100))
+        try unchanged(panel)
         bar.showIdle()
         try await Task.sleep(for: .milliseconds(450))
         try require(!panel.isVisible && panel.collectionBehavior == ordinarySpaces, "Dismissal failed.")

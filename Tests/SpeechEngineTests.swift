@@ -334,6 +334,114 @@ func testFallback() async {
     }
 }
 
+// MARK: - Silence check on the Apple path
+
+/// `samples` (mono, -1...1) in `format`, every channel carrying the same signal.
+func pcm(_ samples: [Float], as format: AVAudioFormat) -> AVAudioPCMBuffer {
+    let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count))!
+    buffer.frameLength = AVAudioFrameCount(samples.count)
+    let channels = Int(format.channelCount), interleaved = format.isInterleaved
+    for channel in 0..<channels {
+        for (frame, sample) in samples.enumerated() {
+            let index = interleaved ? frame * channels + channel : frame
+            if format.commonFormat == .pcmFormatInt16 {
+                buffer.int16ChannelData![interleaved ? 0 : channel][index] = Int16(max(-32768, min(32767, (sample * 32768).rounded())))
+            } else if format.commonFormat == .pcmFormatFloat64 {
+                // AVAudioPCMBuffer has no Float64 accessor; the raw list does.
+                let list = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+                list[interleaved ? 0 : channel].mData!.assumingMemoryBound(to: Double.self)[index] = Double(sample)
+            } else {
+                buffer.floatChannelData![interleaved ? 0 : channel][index] = sample
+            }
+        }
+    }
+    return buffer
+}
+
+func resample(_ samples: [Float], by factor: Int) -> [Float] { samples.flatMap { Array(repeating: $0, count: factor) } }
+
+func testAppleSilence() async {
+    let quietRoom = pinkNoise(16000 * 2, -70)
+    let formats: [(String, AVAudioFormat)] = [
+        ("16 kHz Float32", DictationTranscriber.parakeetFormat),
+        ("16 kHz Int16", int16Format),
+        ("48 kHz Float32", AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48000, channels: 1, interleaved: false)!),
+        ("44.1 kHz Int16", AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 44100, channels: 1, interleaved: true)!),
+        ("48 kHz stereo Int16", AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 48000, channels: 2, interleaved: true)!),
+    ]
+    for (name, format) in formats {
+        let factor = format.sampleRate == 16000 ? 1 : 3
+        let rate = Double(format.sampleRate)
+        // 44.1 kHz gets 48 kHz audio played slower: the windows follow the buffer's own rate.
+        let silent = resample(quietRoom, by: factor), speech = resample(speechSamples(seconds: 2), by: factor)
+        for setting in [SpeechEngineSetting.apple, .parakeet] {
+            var apples: [FakeApple] = []
+            var logs: [String] = []
+            let parakeet = FakeRecognizer(); parakeet.ready = setting == .apple
+            let t = DictationTranscriber(setting: setting, locale: english, parakeet: parakeet,
+                                         makeApple: { let a = FakeApple(format: format); a.text = "okay"; apples.append(a); return a },
+                                         parakeetCap: 10, log: { logs.append($0) })
+            try! await t.begin()
+            t.feed(pcm(Array(silent[..<(silent.count / 2)]), as: format)); t.feed(pcm(Array(silent[(silent.count / 2)...]), as: format))
+            let text = try! await t.finish()
+            check(text.isEmpty && t.lastServed == .silence, "\(name), \(setting): a quiet room on Apple types nothing (got \(text.count) chars)")
+            check(apples[0].finished == 0 && apples[0].cancelled == 1, "\(name), \(setting): Apple is cancelled, not finished, on no speech")
+            let seconds = String(format: "audio_s=%.1f", Double(silent.count) / rate)
+            check(logs.count == 1 && logs[0].hasPrefix("engine: served=none:no-speech \(seconds) finish_ms=") && logs[0].hasSuffix(" chars=0"),
+                  "\(name), \(setting): the log line matches the Parakeet path: \(logs)")
+            try! await t.begin()
+            t.feed(pcm(speech, as: format))
+            let heard = try! await t.finish()
+            check(heard == "okay" && t.lastServed != .silence && apples[0].finished == 1,
+                  "\(name), \(setting): speech still reaches Apple and is typed")
+            check(parakeet.calls == 0, "\(name), \(setting): Parakeet is not called")
+        }
+    }
+    // A press with no audio at all is no speech, as on the Parakeet path.
+    do {
+        let apple = FakeApple(format: int16Format)
+        let t = DictationTranscriber(setting: .apple, locale: english, parakeet: nil, makeApple: { apple },
+                                     parakeetCap: 10, log: { _ in })
+        try! await t.begin()
+        let text = try! await t.finish()
+        check(text.isEmpty && t.lastServed == .silence && apple.cancelled == 1, "no audio at all types nothing")
+    }
+    // Audio the check cannot read never blocks Apple.
+    do {
+        let float64 = AVAudioFormat(commonFormat: .pcmFormatFloat64, sampleRate: 16000, channels: 1, interleaved: false)!
+        let apple = FakeApple(format: float64)
+        let t = DictationTranscriber(setting: .apple, locale: english, parakeet: nil, makeApple: { apple },
+                                     parakeetCap: 10, log: { _ in })
+        try! await t.begin()
+        t.feed(pcm(quietRoom, as: float64))
+        let text = try! await t.finish()
+        check(text == "apple words" && t.lastServed == .appleConfigured, "an unread sample format leaves the session to Apple")
+    }
+    // A cancelled session leaves nothing for the next one.
+    do {
+        let apple = FakeApple(format: int16Format)
+        let t = DictationTranscriber(setting: .apple, locale: english, parakeet: nil, makeApple: { apple },
+                                     parakeetCap: 10, log: { _ in })
+        try! await t.begin()
+        t.feed(pcm(speechSamples(seconds: 2), as: int16Format))
+        await t.cancel()
+        try! await t.begin()
+        t.feed(pcm(quietRoom, as: int16Format))
+        let text = try! await t.finish()
+        check(text.isEmpty && t.lastServed == .silence, "speech from a cancelled session does not count toward the next")
+    }
+    // PCMSamples reads every layout the same way.
+    let stereo = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 2, interleaved: true)!
+    let two = AVAudioPCMBuffer(pcmFormat: stereo, frameCapacity: 2)!
+    two.frameLength = 2
+    two.int16ChannelData![0][0] = 16384; two.int16ChannelData![0][1] = -16384
+    two.int16ChannelData![0][2] = 8192; two.int16ChannelData![0][3] = 0
+    check(PCMSamples.interleaved(two) == [0.5, -0.5, 0.25, 0], "interleaved Int16 reads in frame and channel order")
+    let mono = PCMSamples.mono(two, into: DictationTranscriber.parakeetFormat)
+    check(mono.map { Array(UnsafeBufferPointer(start: $0.floatChannelData![0], count: Int($0.frameLength))) } == [0, 0.125],
+          "the mono mix averages every channel")
+}
+
 // MARK: - Pinned model download
 
 func testModelStore() async throws {
@@ -515,6 +623,7 @@ struct SpeechEngineMain {
         testSpeechActivity()
         testEngineChoice()
         await testFallback()
+        await testAppleSilence()
         do { try await testModelStore() } catch { check(false, "model store threw \(error)") }
         testConfig()
         testCredits()

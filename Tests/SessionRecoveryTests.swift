@@ -4,7 +4,8 @@ import AVFoundation
 // Real AppState sessions driven through its hotkey handler, with a fake speech
 // engine, microphone and cues. Compiled with every app source except main.swift
 // (scripts/test-session-recovery.sh). Never opens the microphone, plays a sound
-// or calls an AI provider; fake transcripts are empty, so nothing is inserted.
+// or calls an AI provider; fake transcripts are empty, so nothing is inserted
+// and a finished session says no speech was detected.
 // The menu bar icon and the recording panel do appear while it runs.
 
 /// What happened, in order, across the fake microphone and cues.
@@ -67,16 +68,18 @@ final class SilentCue: CuePlaying {
 final class FakeTranscriber: Transcriber, @unchecked Sendable {
     enum Stall { case none, begin, finish, cancel }
     struct BeginFailure: Error {}
+    struct FinishFailure: Error {}
     let stall: Stall
     /// What finish() returns. Non-empty only where a test checks retention:
     /// a current session would insert it into the focused field.
     let text: String
     let failBegin: Bool
+    let failFinish: Bool
     private let lock = NSLock()
     private var parked: [CheckedContinuation<Void, Never>] = []
     private var began = 0, finished = 0, cancelled = 0
-    init(_ stall: Stall = .none, text: String = "", failBegin: Bool = false) {
-        self.stall = stall; self.text = text; self.failBegin = failBegin
+    init(_ stall: Stall = .none, text: String = "", failBegin: Bool = false, failFinish: Bool = false) {
+        self.stall = stall; self.text = text; self.failBegin = failBegin; self.failFinish = failFinish
     }
 
     var beginCount: Int { lock.withLock { began } }
@@ -95,6 +98,7 @@ final class FakeTranscriber: Transcriber, @unchecked Sendable {
     func finish() async throws -> String {
         lock.withLock { finished += 1 }
         if stall == .finish { await park() }
+        if failFinish { throw FinishFailure() }
         return text
     }
     func cancel() async {
@@ -193,6 +197,27 @@ final class SessionRecoveryTests: NSObject, NSApplicationDelegate {
             check(await dictate(state), "A press from ready is accepted")
             check(await eventually { state.testingPhase == "idle" }, "A normal dictation returns to ready")
             check(engine.beginCount == 1 && engine.finishCount == 1, "The normal path opens and finishes the analyzer once")
+        }
+
+        // Nothing typed is said in the panel, with the Windows wording, and
+        // VoiceOver hears every panel message.
+        do {
+            let state = makeState([FakeTranscriber()])
+            _ = await dictate(state)
+            check(await eventually { state.testingPhase == "idle" }, "A session that hears nothing returns to ready")
+            check(state.testingLastMessage == "No speech was detected.", "No text says no speech was detected")
+            check(state.testingLastAnnouncement == "No speech was detected.", "VoiceOver hears the no-speech message")
+        }
+        do {
+            let failing = FakeTranscriber(failFinish: true), fresh = FakeTranscriber()
+            let state = makeState([failing, fresh])
+            _ = await dictate(state)
+            check(await eventually { state.testingPhase == "idle" }, "A transcription that throws returns to ready")
+            check(failing.cancelCount == 1, "The failed analyzer is released")
+            check(state.testingLastMessage == "Dictation could not finish. Try again.", "A failed transcription says so")
+            check(state.testingLastAnnouncement == "Dictation could not finish. Try again.", "VoiceOver hears the failure")
+            check(await dictate(state), "The press after a failed transcription is accepted")
+            check(await eventually { state.testingPhase == "idle" }, "And it completes")
         }
 
         // Without a deadline, a stalled analyzer strands the session: the
@@ -306,6 +331,7 @@ final class SessionRecoveryTests: NSObject, NSApplicationDelegate {
             check(state.handle(.begin), "Press accepted with a busy microphone")
             check(await eventually { state.testingPhase == "idle" }, "A busy microphone returns the app to ready at once")
             check(state.testingLastMessage == "The microphone is unavailable or switching. Try again.", "A busy microphone says so")
+            check(state.testingLastAnnouncement == state.testingLastMessage, "VoiceOver hears the microphone message")
             _ = state.handle(.commit)
             check(await dictate(state), "The next press is accepted")
             check(await eventually { state.testingPhase == "idle" } && capture.starts == 1, "And it opens the microphone and completes")

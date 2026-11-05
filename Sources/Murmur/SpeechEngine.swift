@@ -113,13 +113,60 @@ final class SampleBuffer: @unchecked Sendable {
     }
 }
 
+/// Runs the silence check over one session's buffers as they reach Apple's
+/// engine, from the audio thread. Apple takes its own format (16-bit on some
+/// Macs, not always 16 kHz), so samples are read as Float and the windows
+/// follow the buffer's own rate and channel count.
+final class SpeechActivityMeter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var activity: SpeechActivity?
+    private var rate = 0.0
+    private var channels: AVAudioChannelCount = 0
+    private var frames = 0
+    /// Audio this cannot judge (an unread sample format or a format change
+    /// mid-session). The check then never blocks the session.
+    private var unjudged = false
+
+    func reset() {
+        lock.withLock { activity = nil; rate = 0; channels = 0; frames = 0; unjudged = false }
+    }
+
+    func append(_ buffer: AVAudioPCMBuffer) {
+        guard buffer.frameLength > 0 else { return }
+        let format = buffer.format
+        let samples = PCMSamples.interleaved(buffer)
+        lock.withLock {
+            guard !unjudged, let samples else { unjudged = true; return }
+            if activity == nil {
+                activity = SpeechActivity(sampleRate: format.sampleRate, channels: Int(format.channelCount))
+                rate = format.sampleRate
+                channels = format.channelCount
+            }
+            guard format.sampleRate == rate, format.channelCount == channels else { unjudged = true; return }
+            for sample in samples { activity!.add(sample) }
+            frames += Int(buffer.frameLength)
+        }
+    }
+
+    /// Whether the session held speech, and its length. Takes the result and
+    /// starts over. No audio at all is no speech, as on the Parakeet path.
+    func take() -> (hasSpeech: Bool, seconds: Double) {
+        lock.lock(); defer { lock.unlock() }
+        let result = (unjudged || activity?.hasSpeech == true, rate > 0 ? Double(frames) / rate : 0)
+        activity = nil; rate = 0; channels = 0; frames = 0; unjudged = false
+        return result
+    }
+}
+
 /// The app's speech engine slot: Parakeet when chosen, ready and the user's
 /// language is English, Apple otherwise, and Apple again over the same audio
 /// if Parakeet fails.
 ///
 /// Parakeet hears the whole recording at once after the key comes up, so
 /// this buffers 16 kHz mono samples while recording. The silence check runs
-/// first; no speech returns an empty result and nothing is typed.
+/// first on every engine; no speech returns an empty result and nothing is
+/// typed. Apple streams live, so its audio is measured as it is fed and a
+/// silent session is cancelled instead of finished, as Windows does.
 final class DictationTranscriber: Transcriber {
     static let sampleRate = 16000.0
     static let parakeetFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate,
@@ -133,6 +180,7 @@ final class DictationTranscriber: Transcriber {
     private let makeApple: () -> Transcriber
     private let parakeetCap: TimeInterval
     private let buffer = SampleBuffer()
+    private let meter = SpeechActivityMeter()
     private var live: EnginePolicy.Live = .apple
     private var reason: EngineServed = .appleConfigured
     private let log: (String) -> Void
@@ -167,12 +215,18 @@ final class DictationTranscriber: Transcriber {
         if live == .parakeet {
             buffer.reset()
         } else {
+            meter.reset()
             try await apple.begin()
         }
     }
 
     func feed(_ pcm: AVAudioPCMBuffer) {
-        if live == .parakeet { buffer.append(pcm) } else { apple.feed(pcm) }
+        if live == .parakeet {
+            buffer.append(pcm)
+        } else {
+            meter.append(pcm)
+            apple.feed(pcm)
+        }
     }
 
     func finish() async throws -> String {
@@ -185,6 +239,12 @@ final class DictationTranscriber: Transcriber {
             return text
         }
         guard live == .parakeet, let parakeet else {
+            // Apple may type a stray word over room noise; no speech skips it.
+            let heard = meter.take()
+            guard heard.hasSpeech else {
+                await apple.cancel()
+                return done(.silence, "", audio: heard.seconds)
+            }
             let text = try await apple.finish()
             return done(reason, text, audio: nil)
         }
@@ -207,6 +267,7 @@ final class DictationTranscriber: Transcriber {
 
     func cancel() async {
         buffer.reset()
+        meter.reset()
         if live == .apple { await apple.cancel() }
     }
 

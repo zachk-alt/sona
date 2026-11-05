@@ -615,11 +615,18 @@ final class AppState {
         } catch {
             Log.write("transcribe: FAILED \(error)")
             await transcriber.cancel()
+            // Said in the panel, with the Windows wording, so a failure never
+            // looks like text that went somewhere. An abandoned session keeps
+            // its deadline's message.
+            if isCurrent(id, .processing) { sessionFailure = "Dictation could not finish. Try again." }
             return
         }
         guard isCurrent(id, .processing) else { retainLate(raw); return }
         Log.write("transcribe: \(raw.count) chars")
-        guard !raw.isEmpty else { return }
+        guard !raw.isEmpty else {
+            sessionFailure = "No speech was detected."
+            return
+        }
         arm(deadlines.finishing, id, stage: "cleanup or insertion did not finish",
             message: "Sona stalled finishing that dictation. Try again.")
 
@@ -682,6 +689,7 @@ final class AppState {
     var testingPhase: String { "\(phase)" }
     var testingRecordingShown: Bool { recordingShown }
     private(set) var testingLastMessage: String?
+    var testingLastAnnouncement: String? { statusBar.lastAnnouncement }
     #endif
 
     // MARK: - Context

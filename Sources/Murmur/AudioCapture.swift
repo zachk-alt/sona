@@ -379,13 +379,25 @@ final class AudioCapture: AudioCapturing {
 /// The default (Normal) dulled the highest frequencies a little. A sample-rate
 /// converter holds back a few milliseconds of audio between calls; `flush`
 /// returns them once input has ended, so the last sound before stop is heard.
+///
+/// A microphone with more than one channel is mixed to mono first, every
+/// channel averaged, the same rule as Windows. AVAudioConverter alone keeps
+/// only channel 1 of a source with no layout and outputs digital silence for
+/// a discrete or unknown layout (multi-input interfaces), so a mic on input 2
+/// was never heard (measured 2026-11-05).
 final class CaptureConverter {
     let format: AVAudioFormat
     private let converter: AVAudioConverter
+    /// Float32 mono at the source rate, when the source's channels are mixed first.
+    private let mixFormat: AVAudioFormat?
     private var ended = false
 
     init(from source: AVAudioFormat, to target: AVAudioFormat) throws {
-        guard let converter = AVAudioConverter(from: source, to: target) else {
+        let mixFormat = source.channelCount > 1 && target.channelCount == 1 && PCMSamples.readable(source)
+            ? AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: source.sampleRate, channels: 1, interleaved: false)
+            : nil
+        self.mixFormat = mixFormat
+        guard let converter = AVAudioConverter(from: mixFormat ?? source, to: target) else {
             throw TranscriptionError.unavailable("no converter from the microphone format to the speech format")
         }
         try catchingFrameworkException {
@@ -400,8 +412,12 @@ final class CaptureConverter {
     var quality: Int { converter.sampleRateConverterQuality }
 
     /// One microphone buffer in, whatever the converter releases out.
-    func convert(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
-        guard !ended, let converted = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity(for: buffer.frameLength, from: buffer.format))
+    func convert(_ source: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard !ended else { return nil }
+        let mixed = mixFormat.flatMap { PCMSamples.mono(source, into: $0) }
+        if mixFormat != nil, mixed == nil { return nil }
+        let buffer = mixed ?? source
+        guard let converted = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity(for: buffer.frameLength, from: buffer.format))
         else { return nil }
         var supplied = false
         var error: NSError?
