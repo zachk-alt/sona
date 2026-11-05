@@ -34,6 +34,19 @@ internal static class WindowsSelfTest
             Check("compact_recording_size", panel.Width == RecordingPanel.PanelWidth && panel.Height == RecordingPanel.PanelHeight && panel.AllowsTransparency);
             using (var activeIcon = TrayIcons.Active()) Check("shared_blue_active_icon", activeIcon.Width > 0 && activeIcon.Height > 0);
             panel.Close();
+            // ---- UI parity checks (0.4.0). Each one fails on the build before its change. ----
+            {
+                // The credit is the Mac's script logo; screen readers call the panel Sona and read the credit as help text.
+                var credited = new RecordingPanel();
+                var creditSurface = (PanelSurface)credited.Content;
+                Check("credit_logo_resources", CreditLogo.For(false) is { PixelWidth: 441, PixelHeight: 54 } && CreditLogo.For(true) is { PixelWidth: 441, PixelHeight: 54 });
+                Check("panel_uia_name_is_sona", System.Windows.Automation.AutomationProperties.GetName(credited) == "Sona"
+                    && System.Windows.Automation.Peers.UIElementAutomationPeer.CreatePeerForElement(credited)?.GetName() == "Sona");
+                Check("panel_credit_is_help_text_not_name", System.Windows.Automation.AutomationProperties.GetName(creditSurface) == ""
+                    && System.Windows.Automation.Peers.UIElementAutomationPeer.CreatePeerForElement(creditSurface)?.GetHelpText() == "by Actual Intelligence Labs");
+                credited.Close();
+            }
+            // ---- End of UI parity checks. ----
             string bridge = Path.Combine(AppContext.BaseDirectory, "bridge", "sona-cleanup.mjs");
             Check("bridge_packaged", File.Exists(bridge));
             Check("assistant_runtime_excluded", new[] { "Sona.Windows.AssistantActionExecutor", "Sona.Windows.AssistantActionWorker", "Sona.Windows.AssistantCursor", "Sona.Windows.AssistantUserActivity", "Sona.Windows.AssistantPanel", "Sona.Windows.AssistantSettingsWindow", "Sona.Windows.WindowInvocation", "Sona.Windows.WindowContextWorker", "Sona.Windows.SessionActivity" }.All(name => typeof(App).Assembly.GetType(name) == null));

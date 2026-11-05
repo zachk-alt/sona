@@ -36,7 +36,10 @@ internal sealed class RecordingPanel : Window
         AllowsTransparency = true; Background = Brushes.Transparent;
         ShowInTaskbar = false; ShowActivated = false; Topmost = true; Focusable = false;
         Content = surface;
-        errorTimer.Tick += (_, _) => { errorTimer.Stop(); surface.SetError(null); Dismiss(); };
+        // The panel is named Sona; the drawn credit is only help text, so Narrator never reads an error as the credit.
+        AutomationProperties.SetName(this, "Sona");
+        AutomationProperties.SetHelpText(surface, PanelSurface.CreditText);
+        errorTimer.Tick +=(_, _) => { errorTimer.Stop(); surface.SetError(null); Dismiss(); };
         _ = Task.Run(PanelSurface.WarmUp);
         SourceInitialized += (_, _) =>
         {
@@ -288,6 +291,8 @@ internal static class CreditLogo
 /// once per scale and look; the bars and the rim lights are written into reused bitmaps each frame.
 internal sealed class PanelSurface : FrameworkElement
 {
+    /// The Mac credit's VoiceOver label, and the text drawn when the logo cannot load.
+    public const string CreditText = "by Actual Intelligence Labs";
     private static readonly Color Blue = Color.FromRgb(15, 92, 216);
     private const double BarSigma = 2.4, GlowReach = 8.4, HaloReach = 13;
     private const int MaxColumnBars = 6;
@@ -323,6 +328,9 @@ internal sealed class PanelSurface : FrameworkElement
     }
 
     public static void WarmUp() => _ = Shadows.Value;
+
+    // Its own UIA peer, so the credit's help text reaches screen readers. It has no name and never takes focus.
+    protected override AutomationPeer OnCreateAutomationPeer() => new FrameworkElementAutomationPeer(this);
 
     public bool LightsVisible
     {
@@ -638,11 +646,13 @@ internal sealed class PanelSurface : FrameworkElement
     // inside the glass (the Mac's 12 pt field margin plus its 2 pt text inset). The logo is 14 DIP tall with its
     // baseline 26% of the way up, so "by" lines up with the bottom of "Actual". Only "by" carries the shadow, as
     // on the Mac. High contrast draws the logo's shape in the theme's text color. Without the logo resource the
-    // text credit stands in.
+    // text credit stands in. The Mac's field is 17 pt tall with the logo and 16 pt with text only, which puts
+    // the baseline 92.5 DIP below the glass top for the logo and 93 for the text.
     private void AddCredit(double[] pixels)
     {
         var typeface = new Typeface(new FontFamily("Segoe UI"), FontStyles.Normal, FontWeights.SemiBold, FontStretches.Normal);
-        double right = PanelGeometry.Margin + PanelGeometry.GlassWidth - CreditLogo.RightInset, baseline = PanelGeometry.Margin + 93;
+        double right = PanelGeometry.Margin + PanelGeometry.GlassWidth - CreditLogo.RightInset;
+        double baseline = PanelGeometry.Margin + 92.5, textBaseline = PanelGeometry.Margin + 93;
         var logo = CreditLogo.For(look.Light);
         var visual = new DrawingVisual();
         TextOptions.SetTextRenderingMode(visual, TextRenderingMode.Grayscale);
@@ -670,11 +680,11 @@ internal sealed class PanelSurface : FrameworkElement
         }
         else
         {
-            var text = new FormattedText("by Actual Intelligence Labs", CultureInfo.InvariantCulture, FlowDirection.LeftToRight, typeface, 10, LabelBrush(), scale);
+            var text = new FormattedText(CreditText, CultureInfo.InvariantCulture, FlowDirection.LeftToRight, typeface, 10, LabelBrush(), scale);
             var brand = new SolidColorBrush(look.HighContrast ? look.Text : Blue); brand.Freeze();
             text.SetForegroundBrush(brand, 3, 24);
             using var dc = visual.RenderOpen();
-            dc.DrawText(text, new Point(right - text.WidthIncludingTrailingWhitespace, baseline - text.Baseline));
+            dc.DrawText(text, new Point(right - text.WidthIncludingTrailingWhitespace, textBaseline - text.Baseline));
         }
         var glyphs = Rasterize(visual);
         if (!look.HighContrast)
