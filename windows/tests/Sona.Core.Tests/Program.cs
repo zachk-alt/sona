@@ -658,6 +658,33 @@ var fourWav = SpeechAudio.Mono16k(Wav(NAudio.Wave.WaveFormat.CreateIeeeFloatWave
 Check(fourWav.Length == 32000 && Math.Abs(ToneDb(fourWav, 1000) + 12.04) < 0.1, "a 4-channel 48 kHz float WAV becomes 16 kHz mono at the right level");
 var stereoWav = SpeechAudio.Mono16k(Wav(new NAudio.Wave.WaveFormat(44100, 16, 2), Channels(Tone(1000, 44100, 2), Tone(1000, 44100, 2))));
 Check(stereoWav.Length == 32000 && Math.Abs(ToneDb(stereoWav, 1000)) < 0.1, "a 16-bit stereo 44.1 kHz WAV becomes 16 kHz mono at the right level");
+// Long recordings: Parakeet decodes pieces cut at the quietest 0.3 s between 10 and 20 s after the previous cut.
+float[] Speechy(double seconds, params (double From, double To)[] quiet)
+{
+    var x = new float[(int)(seconds * 16000)];
+    for (int i = 0; i < x.Length; i++)
+    {
+        double t = i / 16000.0;
+        x[i] = quiet.Any(q => t >= q.From && t < q.To) ? 0.0005f * (float)Math.Sin(i * 0.37) : 0.3f * (float)Math.Sin(2 * Math.PI * 220 * t);
+    }
+    return x;
+}
+bool Covers(IReadOnlyList<(int Start, int Length)> pieces, int total) =>
+    pieces.Count > 0 && pieces[0].Start == 0 && pieces.Zip(pieces.Skip(1)).All(p => p.First.Start + p.First.Length == p.Second.Start)
+    && pieces[^1].Start + pieces[^1].Length == total && pieces.All(p => p.Length > 0);
+Check(SpeechAudio.SpeechPieces(Speechy(20)).Count == 1 && SpeechAudio.SpeechPieces(Speechy(19.5)).Count == 1, "a recording of 20 s or less is decoded in one piece");
+Check(SpeechAudio.SpeechPieces(Array.Empty<float>()).Count == 0, "an empty recording has no pieces");
+var paused = Speechy(40, (14.0, 14.6), (27.0, 27.6));
+var pausedPieces = SpeechAudio.SpeechPieces(paused);
+Check(Covers(pausedPieces, paused.Length), "pieces cover the whole recording with no gap or overlap");
+Check(pausedPieces.Count == 3 && pausedPieces[1].Start / 16000.0 is > 14.0 and < 14.6 && pausedPieces[2].Start / 16000.0 is > 27.0 and < 27.6, "a 40 s recording is cut inside each pause");
+var longest = Speechy(300.37, (11.0, 11.5), (100.0, 100.4), (250.0, 250.9));
+var longPieces = SpeechAudio.SpeechPieces(longest);
+Check(Covers(longPieces, longest.Length) && longPieces.All(p => p.Length <= 20 * 16000) && longPieces.SkipLast(1).All(p => p.Length >= 10 * 16000), "a 300 s recording becomes pieces of 10 to 20 s, ending exactly at the last sample");
+Check(longPieces.Any(p => p.Start / 16000.0 is > 11.0 and < 11.5) && longPieces.Any(p => p.Start / 16000.0 is > 100.0 and < 100.4), "cuts land in pauses when there are some in range");
+var badLong = Speechy(45); badLong[5000] = float.NaN;
+Check(Covers(SpeechAudio.SpeechPieces(badLong), badLong.Length), "a non-finite sample does not break the cuts");
+Check(new AppSettings().MaximumRecordingSeconds == 300 && new AppSettings { MaximumRecordingSeconds = 900 }.Validate().MaximumRecordingSeconds == 300, "recordings run to 300 s by default, the most the pieces were measured on");
 // High hiss above 8 kHz is not what the engine hears, so it no longer raises the floor the speech check measures.
 float[] Hiss(int n, double dbfs) { var noise = WhiteNoise(n, dbfs); var high = new float[n]; for (int i = 1; i < n - 1; i++) high[i] = (noise[i] - 0.5f * (noise[i - 1] + noise[i + 1])) * 0.8165f; return high; }
 var hissy = Mix(Syllables(Rate, 2.0, -40), Hiss(Rate * 2, -30));

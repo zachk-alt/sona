@@ -25,7 +25,7 @@ public sealed record AppSettings
     public string? MicrophoneId { get; init; }
     public string? NodePath { get; init; }
     public bool StartAtLogin { get; init; }
-    public int MaximumRecordingSeconds { get; init; } = 120;
+    public int MaximumRecordingSeconds { get; init; } = 300;
 
     public AppSettings Validate() => this with
     {
@@ -57,7 +57,7 @@ public static class SettingsStore
                 Shortcut = Read("shortcut", defaults.Shortcut),
                 AutoAddToDictionary = Read("autoAddToDictionary", false), CleanupEnabled = Read("cleanupEnabled", true),
                 Language = Read("language", AppSettings.DefaultLanguage), MicrophoneId = Read<string?>("microphoneId", null), NodePath = Read<string?>("nodePath", null),
-                StartAtLogin = Read("startAtLogin", false), MaximumRecordingSeconds = Read("maximumRecordingSeconds", 120)
+                StartAtLogin = Read("startAtLogin", false), MaximumRecordingSeconds = Read("maximumRecordingSeconds", 300)
             }).Validate();
         }
         catch (Exception e) when (e is IOException or JsonException or UnauthorizedAccessException or InvalidOperationException) { return new(); }

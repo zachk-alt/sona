@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
 using SherpaOnnx;
+using Sona.Core;
 
 namespace Sona.Windows;
 
@@ -36,14 +37,21 @@ internal sealed class ParakeetRecognizer : IDisposable
         recognizer = created;
     }
 
-    /// 16 kHz mono float samples in, trimmed text out.
+    /// 16 kHz mono float samples in, trimmed text out. A recording over 20 s is decoded in pieces cut at pauses
+    /// (SpeechAudio.SpeechPieces), one stream each, and the texts are joined with spaces.
     public string Transcribe(float[] samples)
     {
         var current = recognizer ?? throw new ObjectDisposedException(nameof(ParakeetRecognizer));
-        using var stream = current.CreateStream();
-        stream.AcceptWaveform(SampleRate, samples);
-        current.Decode(stream);
-        return stream.Result.Text.Trim();
+        var texts = new List<string>();
+        foreach (var (start, length) in SpeechAudio.SpeechPieces(samples))
+        {
+            using var stream = current.CreateStream();
+            stream.AcceptWaveform(SampleRate, start == 0 && length == samples.Length ? samples : samples[start..(start + length)]);
+            current.Decode(stream);
+            string text = stream.Result.Text.Trim();
+            if (text.Length > 0) texts.Add(text);
+        }
+        return string.Join(' ', texts);
     }
 
     public void Dispose() { recognizer?.Dispose(); recognizer = null; }
