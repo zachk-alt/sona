@@ -36,7 +36,10 @@ internal sealed class RecordingPanel : Window
         AllowsTransparency = true; Background = Brushes.Transparent;
         ShowInTaskbar = false; ShowActivated = false; Topmost = true; Focusable = false;
         Content = surface;
-        errorTimer.Tick += (_, _) => { errorTimer.Stop(); surface.SetError(null); Dismiss(); };
+        // The panel is named Sona; the drawn credit is only help text, so Narrator never reads an error as the credit.
+        AutomationProperties.SetName(this, "Sona");
+        AutomationProperties.SetHelpText(surface, PanelSurface.CreditText);
+        errorTimer.Tick +=(_, _) => { errorTimer.Stop(); surface.SetError(null); Dismiss(); };
         _ = Task.Run(PanelSurface.WarmUp);
         SourceInitialized += (_, _) =>
         {
@@ -121,32 +124,53 @@ internal sealed class RecordingPanel : Window
         new WindowInteropHelper(this).EnsureHandle();
         var look = PanelLook.Current();
         surface.Configure(Scale, look);
-        Place();
+        // Placed once per appearance, like the Mac (StatusBarController.positionSurface): processing, an error and a
+        // cancelled fade keep the first spot, even if the target window has moved to another monitor since.
+        bool fresh = !IsVisible;
+        if (fresh) Place();
         if (!IsVisible) Show();
         Native.ShowWindow(handle, 4); // SW_SHOWNOACTIVATE: raise without activating.
-        Place(); // Settles a move onto a monitor with another scale.
+        if (fresh) Place(); // Settles a move onto a monitor with another scale.
+        else if (placed) MoveTo(handle, originX, originY, raise: true); // Raised again, in the same spot.
         surface.Configure(Scale, look);
     }
+
+    /// The panel's top left corner on screen, in device pixels.
+    internal (int X, int Y) ScreenOrigin => handle != 0 && GetWindowRect(handle, out var bounds) ? (bounds.Left, bounds.Top) : (originX, originY);
+
+    /// Test seam for the placement check: the monitor and work area (device pixels) and scale to place on,
+    /// in place of the target window's monitor.
+    internal Func<(Native.Rect Monitor, Native.Rect Work, double Scale)>? ScreenForTests { get; set; }
 
     // The Mac fallback placement (AssistantPanelPlacement.origin without a menu anchor), in device
     // pixels on the monitor of the foreground window: glass center 180 DIP from the monitor's right
     // edge, glass top 6 DIP below the top of the work area, kept 8 DIP inside the work area.
     private void Place()
     {
-        nint window = lastForeground != 0 && Native.IsWindow(lastForeground) ? lastForeground : Native.GetForegroundWindow();
-        nint monitor = MonitorFromWindow(window, 2);
-        var info = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
-        if (monitor == 0 || !GetMonitorInfo(monitor, ref info)) return;
-        double k = GetDpiForMonitor(monitor, 0, out uint dpi, out _) == 0 && dpi > 0 ? dpi / 96.0 : Scale;
+        if (ScreenForTests?.Invoke() is not { } screen && !TargetScreen(out screen)) return;
+        var (monitorRect, work, k) = screen;
         double glassWidth = PanelGeometry.GlassWidth * k, glassHeight = PanelGeometry.GlassHeight * k, margin = PanelGeometry.Margin * k;
-        double minX = info.Work.Left + 8 * k, maxX = info.Work.Right - 8 * k - glassWidth;
-        double minTop = info.Work.Top + 6 * k, maxTop = info.Work.Bottom - 8 * k - glassHeight;
-        double glassX = Math.Min(maxX, Math.Max(minX, info.Monitor.Right - 180 * k - glassWidth / 2));
-        double glassTop = Math.Max(info.Work.Top, Math.Min(minTop, maxTop));
+        double minX = work.Left + 8 * k, maxX = work.Right - 8 * k - glassWidth;
+        double minTop = work.Top + 6 * k, maxTop = work.Bottom - 8 * k - glassHeight;
+        double glassX = Math.Min(maxX, Math.Max(minX, monitorRect.Right - 180 * k - glassWidth / 2));
+        double glassTop = Math.Max(work.Top, Math.Min(minTop, maxTop));
         originX = (int)Math.Round(glassX - margin); originY = (int)Math.Round(glassTop - margin); placed = true;
         uint before = GetDpiForWindow(handle);
         MoveTo(handle, originX, originY, raise: true);
         if (GetDpiForWindow(handle) != before) MoveTo(handle, originX, originY, raise: true);
+    }
+
+    // The monitor of the window being dictated into, or of the foreground window when that one has closed.
+    private bool TargetScreen(out (Native.Rect Monitor, Native.Rect Work, double Scale) screen)
+    {
+        screen = default;
+        nint window = lastForeground != 0 && Native.IsWindow(lastForeground) ? lastForeground : Native.GetForegroundWindow();
+        nint monitor = MonitorFromWindow(window, 2);
+        var info = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
+        if (monitor == 0 || !GetMonitorInfo(monitor, ref info)) return false;
+        double k = GetDpiForMonitor(monitor, 0, out uint dpi, out _) == 0 && dpi > 0 ? dpi / 96.0 : Scale;
+        screen = (info.Monitor, info.Work, k);
+        return true;
     }
 
     // SWP_NOSIZE | SWP_NOACTIVATE, plus HWND_TOPMOST when raising or SWP_NOZORDER for a plain move.
@@ -217,6 +241,7 @@ internal sealed class RecordingPanel : Window
     [DllImport("user32.dll")] private static extern nint MonitorFromWindow(nint window, uint flags);
     [DllImport("user32.dll")] private static extern bool GetMonitorInfo(nint monitor, ref MonitorInfo info);
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(nint window);
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(nint window, out Native.Rect bounds);
     [DllImport("shcore.dll")] private static extern int GetDpiForMonitor(nint monitor, int type, out uint dpiX, out uint dpiY);
     [DllImport("user32.dll")] private static extern bool SetWindowPos(nint window, nint after, int x, int y, int width, int height, uint flags);
 }
@@ -288,6 +313,8 @@ internal static class CreditLogo
 /// once per scale and look; the bars and the rim lights are written into reused bitmaps each frame.
 internal sealed class PanelSurface : FrameworkElement
 {
+    /// The Mac credit's VoiceOver label, and the text drawn when the logo cannot load.
+    public const string CreditText = "by Actual Intelligence Labs";
     private static readonly Color Blue = Color.FromRgb(15, 92, 216);
     private const double BarSigma = 2.4, GlowReach = 8.4, HaloReach = 13;
     private const int MaxColumnBars = 6;
@@ -323,6 +350,9 @@ internal sealed class PanelSurface : FrameworkElement
     }
 
     public static void WarmUp() => _ = Shadows.Value;
+
+    // Its own UIA peer, so the credit's help text reaches screen readers. It has no name and never takes focus.
+    protected override AutomationPeer OnCreateAutomationPeer() => new FrameworkElementAutomationPeer(this);
 
     public bool LightsVisible
     {
@@ -638,11 +668,13 @@ internal sealed class PanelSurface : FrameworkElement
     // inside the glass (the Mac's 12 pt field margin plus its 2 pt text inset). The logo is 14 DIP tall with its
     // baseline 26% of the way up, so "by" lines up with the bottom of "Actual". Only "by" carries the shadow, as
     // on the Mac. High contrast draws the logo's shape in the theme's text color. Without the logo resource the
-    // text credit stands in.
+    // text credit stands in. The Mac's field is 17 pt tall with the logo and 16 pt with text only, which puts
+    // the baseline 92.5 DIP below the glass top for the logo and 93 for the text.
     private void AddCredit(double[] pixels)
     {
         var typeface = new Typeface(new FontFamily("Segoe UI"), FontStyles.Normal, FontWeights.SemiBold, FontStretches.Normal);
-        double right = PanelGeometry.Margin + PanelGeometry.GlassWidth - CreditLogo.RightInset, baseline = PanelGeometry.Margin + 93;
+        double right = PanelGeometry.Margin + PanelGeometry.GlassWidth - CreditLogo.RightInset;
+        double baseline = PanelGeometry.Margin + 92.5, textBaseline = PanelGeometry.Margin + 93;
         var logo = CreditLogo.For(look.Light);
         var visual = new DrawingVisual();
         TextOptions.SetTextRenderingMode(visual, TextRenderingMode.Grayscale);
@@ -670,11 +702,11 @@ internal sealed class PanelSurface : FrameworkElement
         }
         else
         {
-            var text = new FormattedText("by Actual Intelligence Labs", CultureInfo.InvariantCulture, FlowDirection.LeftToRight, typeface, 10, LabelBrush(), scale);
+            var text = new FormattedText(CreditText, CultureInfo.InvariantCulture, FlowDirection.LeftToRight, typeface, 10, LabelBrush(), scale);
             var brand = new SolidColorBrush(look.HighContrast ? look.Text : Blue); brand.Freeze();
             text.SetForegroundBrush(brand, 3, 24);
             using var dc = visual.RenderOpen();
-            dc.DrawText(text, new Point(right - text.WidthIncludingTrailingWhitespace, baseline - text.Baseline));
+            dc.DrawText(text, new Point(right - text.WidthIncludingTrailingWhitespace, textBaseline - text.Baseline));
         }
         var glyphs = Rasterize(visual);
         if (!look.HighContrast)

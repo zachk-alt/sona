@@ -14,7 +14,7 @@ internal sealed class SettingsWindow : Window
 {
     private readonly AppSettings current;
     private Shortcut selectedShortcut;
-    private readonly CheckBox autoAdd = new() { Content = "Suggest dictionary words from corrections for 15 seconds after dictation" };
+    private readonly CheckBox autoAdd = new() { Content = "Suggest vocabulary spellings from my corrections for 15 seconds after dictation" };
     private readonly TextBox vocabulary = new() { AcceptsReturn = true, Height = 120, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, TextWrapping = TextWrapping.Wrap };
     private readonly ObservableCollection<SnippetRow> snippets = new();
     private readonly DataGrid snippetGrid = new() { Height = 190, AutoGenerateColumns = false, CanUserAddRows = true, CanUserDeleteRows = true };
@@ -111,12 +111,12 @@ internal sealed class SettingsWindow : Window
         try { vocabulary.Text = string.Join("\n", document?["vocabulary"]?.AsArray().Select(v => v!.GetValue<string>()) ?? Enumerable.Empty<string>()); }
         catch { configReadFailed = true; status.Text = "Vocabulary could not be read. Correct the configuration file and reopen Settings before saving."; }
         stack.Children.Add(Description("One word or phrase per line. Add, edit or remove entries here. Vocabulary guides optional AI cleanup; it does not retrain the local speech engine.")); stack.Children.Add(vocabulary);
-        Label(stack, "Snippets");
+        Label(stack, "Saved phrases");
         try { foreach (var row in document?["snippets"]?.AsArray() ?? new JsonArray()) snippets.Add(new() { Trigger = row!["trigger"]!.GetValue<string>(), Expansion = row["expansion"]!.GetValue<string>() }); }
-        catch { configReadFailed = true; status.Text = "Snippets could not be read. Correct the configuration file and reopen Settings before saving."; }
+        catch { configReadFailed = true; status.Text = "Saved phrases could not be read. Correct the configuration file and reopen Settings before saving."; }
         snippetGrid.ItemsSource = snippets;
-        snippetGrid.Columns.Add(new DataGridTextColumn { Header = "Spoken trigger", Binding = new Binding(nameof(SnippetRow.Trigger)), Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
-        snippetGrid.Columns.Add(new DataGridTextColumn { Header = "Expansion", Binding = new Binding(nameof(SnippetRow.Expansion)), Width = new DataGridLength(2, DataGridLengthUnitType.Star) });
+        snippetGrid.Columns.Add(new DataGridTextColumn { Header = "When I say", Binding = new Binding(nameof(SnippetRow.Trigger)), Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
+        snippetGrid.Columns.Add(new DataGridTextColumn { Header = "Insert this text", Binding = new Binding(nameof(SnippetRow.Expansion)), Width = new DataGridLength(2, DataGridLengthUnitType.Star) });
         stack.Children.Add(snippetGrid);
         var snippetButtons = new StackPanel { Orientation = Orientation.Horizontal };
         var addSnippet = new Button { Content = "Add / edit selected…", Margin = new Thickness(0, 6, 8, 0) };
@@ -127,27 +127,27 @@ internal sealed class SettingsWindow : Window
         stack.Children.Add(Description("Literal phrase expansion runs before optional AI cleanup. No commands, macros or recursive expansion. New rows are saved only with Save."));
         Label(stack, "Optional setup assistance");
         var context = new TextBox { Height = 80, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MaxLength = 12000, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
-        stack.Children.Add(Description("Describe snippets you want. Only the context you type here is sent to your saved provider when you click Suggest. Proposals must be reviewed, added to the editor and saved. No automatic setup calls.")); stack.Children.Add(context);
-        var suggest = new Button { Content = "Suggest snippets for review", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 8, 0, 0) };
+        stack.Children.Add(Description("Describe the saved phrases you want, such as your scheduling link or email signature. Only the context you type here is sent to your saved provider when you click Suggest. Proposals must be reviewed, added to the editor and saved. No automatic setup calls.")); stack.Children.Add(context);
+        var suggest = new Button { Content = "Suggest saved phrases", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 8, 0, 0) };
         string savedProvider = ReadAi("provider", "none");
         void AssistAvailable() => suggest.IsEnabled = File.Exists(aiConfigPath) && savedProvider is not ("none" or "gemini-cli" or "custom") && (provider.SelectedItem as ProviderOption)?.Id == savedProvider;
         AssistAvailable(); provider.SelectionChanged += (_, _) => { assistanceCancellation?.Cancel(); AssistAvailable(); };
         suggest.Click += async (_, _) =>
         {
-            if (string.IsNullOrWhiteSpace(context.Text)) { status.Text = "Enter context, or add snippets manually above."; return; }
+            if (string.IsNullOrWhiteSpace(context.Text)) { status.Text = "Enter context, or add saved phrases manually above."; return; }
             suggest.IsEnabled = false;
             using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(35)); assistanceCancellation = cancellation;
             try
             {
                 var reply = await assist(context.Text, cancellation.Token);
                 if (reply.Status == "ok" && reply.Snippets is { Length: > 0 }) ReviewProposals(reply.Snippets);
-                else status.Text = "No proposals are available. Add or edit snippets manually. Your settings were not changed.";
+                else status.Text = "No suggestions are available. Add or edit saved phrases manually. Your settings were not changed.";
             }
-            catch { status.Text = "Assistance could not complete. Use the manual snippet editor."; }
+            catch { status.Text = "Suggestions could not complete. Add saved phrases manually above."; }
             finally { assistanceCancellation = null; AssistAvailable(); }
         }; stack.Children.Add(suggest);
         stack.Children.Add(Description("Save provider changes first. Assistance is unavailable with None, Gemini CLI or Custom; it never switches providers or starts a login."));
-        Label(stack, "Correction suggestions"); autoAdd.IsChecked = settings.AutoAddToDictionary; stack.Children.Add(autoAdd);
+        Label(stack, "Spelling suggestions"); autoAdd.IsChecked = settings.AutoAddToDictionary; stack.Children.Add(autoAdd);
         stack.Children.Add(Description("Off by default. When enabled, Sona supports initially empty plain-text fields and single-line ASCII dictation up to 4096 characters. For up to 15 seconds, select a whole alphabetic word, replace it with letter keys and pause 500 ms. Backspace, punctuation and later clicks stop this first capability. It stops on outside typing, navigation, paste, focus change, a new recording or an ambiguous range before reading changed text. Only a possible single-word replacement is offered for your confirmation. No word is saved silently and no document history is saved. Unsupported fields are skipped."));
         Label(stack, "Node executable (optional override)"); node.Text = settings.NodePath ?? ""; stack.Children.Add(node);
         stack.Children.Add(Description("The installer includes Node for the shared cleanup bridge. An existing Node 20+ installation can also be used; Gemini CLI requires Node 24+."));
@@ -224,9 +224,9 @@ internal sealed class SettingsWindow : Window
     {
         var trigger = new TextBox { Text = row?.Trigger ?? "", Margin = new Thickness(0, 0, 0, 12) };
         var expansion = new TextBox { Text = row?.Expansion ?? "", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, Height = 180, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
-        var content = new StackPanel { Margin = new Thickness(20) }; content.Children.Add(new TextBlock { Text = "Spoken trigger" }); content.Children.Add(trigger); content.Children.Add(new TextBlock { Text = "Literal expansion" }); content.Children.Add(expansion);
+        var content = new StackPanel { Margin = new Thickness(20) }; content.Children.Add(new TextBlock { Text = "When I say" }); content.Children.Add(trigger); content.Children.Add(new TextBlock { Text = "Insert this text" }); content.Children.Add(expansion);
         var button = new Button { Content = "Apply to editor", Margin = new Thickness(0, 12, 0, 0) }; content.Children.Add(button);
-        var dialog = new Window { Title = "Edit snippet", Width = 480, Height = 340, Content = content, Owner = this, WindowStartupLocation = WindowStartupLocation.CenterOwner };
+        var dialog = new Window { Title = row == null ? "Add a saved phrase" : "Edit a saved phrase", Width = 480, Height = 340, Content = content, Owner = this, WindowStartupLocation = WindowStartupLocation.CenterOwner };
         button.Click += (_, _) =>
         {
             try
@@ -235,7 +235,7 @@ internal sealed class SettingsWindow : Window
                 FeatureConfig.Snippets(snippets.Where(s => s != row).Select(s => new Snippet(s.Trigger, s.Expansion)).Append(proposal));
                 if (row != null) snippets.Remove(row); snippets.Add(new() { Trigger = proposal.Trigger, Expansion = proposal.Expansion }); dialog.Close();
             }
-            catch (Exception e) { MessageBox.Show(dialog, e.Message, "Snippet validation"); }
+            catch (Exception e) { MessageBox.Show(dialog, e.Message, "Saved phrases"); }
         }; dialog.ShowDialog();
     }
     private void ReviewProposals(Snippet[] proposals)
@@ -243,8 +243,8 @@ internal sealed class SettingsWindow : Window
         var content = new StackPanel { Margin = new Thickness(20) };
         var choices = proposals.Select(p => (Snippet: p, Check: new CheckBox { Content = new TextBlock { Text = p.Trigger + "\n" + p.Expansion, TextWrapping = TextWrapping.Wrap }, Margin = new Thickness(0, 0, 0, 18), IsChecked = false })).ToArray();
         foreach (var choice in choices) content.Children.Add(choice.Check);
-        var add = new Button { Content = "Add checked proposals to editor" }; content.Children.Add(add);
-        var dialog = new Window { Title = "Review snippet proposals", Width = 560, Height = 550, Owner = this, Content = new ScrollViewer { Content = content, VerticalScrollBarVisibility = ScrollBarVisibility.Auto }, WindowStartupLocation = WindowStartupLocation.CenterOwner };
+        var add = new Button { Content = "Add checked phrases to the editor" }; content.Children.Add(add);
+        var dialog = new Window { Title = "Review suggested phrases", Width = 560, Height = 550, Owner = this, Content = new ScrollViewer { Content = content, VerticalScrollBarVisibility = ScrollBarVisibility.Auto }, WindowStartupLocation = WindowStartupLocation.CenterOwner };
         add.Click += (_, _) =>
         {
             try
@@ -252,9 +252,9 @@ internal sealed class SettingsWindow : Window
                 var accepted = choices.Where(c => c.Check.IsChecked == true).Select(c => c.Snippet).ToArray();
                 FeatureConfig.Snippets(snippets.Select(s => new Snippet(s.Trigger, s.Expansion)).Concat(accepted));
                 foreach (var p in accepted) snippets.Add(new() { Trigger = p.Trigger, Expansion = p.Expansion });
-                dialog.Close(); status.Text = "Reviewed proposals are in the editor. Save to persist them.";
+                dialog.Close(); status.Text = "The checked phrases are in the editor. Save to keep them.";
             }
-            catch (Exception e) { MessageBox.Show(dialog, e.Message, "Snippet validation"); }
+            catch (Exception e) { MessageBox.Show(dialog, e.Message, "Saved phrases"); }
         }; dialog.ShowDialog();
     }
     public sealed class SnippetRow { public string Trigger { get; set; } = ""; public string Expansion { get; set; } = ""; }

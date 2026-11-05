@@ -97,26 +97,38 @@ internal sealed class App : Application
             MessageBox.Show("This Sona build requires Windows 11 x64. ARM64 and Windows 10 are not supported by this release.", "Sona"); Shutdown(1); return;
         }
         instance = new Mutex(true, "Local\\Sona.Dictation", out bool first);
-        if (!first) { MessageBox.Show("Sona is already running in the system tray.", "Sona"); Shutdown(); return; }
+        if (!first)
+        {
+            // Opens Settings in the running Sona (it refuses during a dictation), like reopening the Mac app. The
+            // message stays only for the moment before the first launch starts listening.
+            if (!ReopenSignal.Send(ReopenSignal.Name)) MessageBox.Show("Sona is already running in the system tray.", "Sona");
+            Shutdown(); return;
+        }
+        var reopen = ReopenSignal.Listen(ReopenSignal.Name, OpenSettings);
+        Exit += (_, _) => reopen.Dispose();
         Directory.CreateDirectory(data);
         settings = SettingsStore.Load(ConfigPath);
         using var resource = GetResourceStream(new Uri("pack://application:,,,/Assets/Sona.ico"))!.Stream;
         using var icon = new System.Drawing.Icon(resource);
         idleIcon = (System.Drawing.Icon)icon.Clone(); activeIcon = TrayIcons.Active();
         tray = new Forms.NotifyIcon { Icon = idleIcon, Text = "Sona", Visible = true };
-        var menu = new Forms.ContextMenuStrip();
-        menu.Items.Add("Settings…", null, (_, _) => Dispatcher.Invoke(OpenSettings));
-        menu.Items.Add("Copy last dictation", null, (_, _) => Dispatcher.Invoke(() =>
-        {
-            if (latest.Length == 0) { Notify("There is no dictation to copy yet."); return; }
-            try { Clipboard.SetText(latest); Notify("Last dictation copied."); } catch { Notify("The clipboard is busy. Try again."); }
-        }));
-        menu.Items.Add("Review dictionary suggestion…", null, (_, _) => Dispatcher.Invoke(ReviewCorrection));
-        menu.Items.Add("Review last dictation…", null, (_, _) => Dispatcher.Invoke(ReviewLatest));
-        menu.Items.Add("Cancel recording or processing", null, (_, _) => Dispatcher.InvokeAsync(CancelAsync));
-        menu.Items.Add(new Forms.ToolStripSeparator());
-        menu.Items.Add("Quit Sona", null, (_, _) => Dispatcher.InvokeAsync(QuitAsync));
+        var menu = TrayMenu.Build(new TrayMenuActions(
+            Settings: () => Dispatcher.Invoke(OpenSettings),
+            CopyLast: () => Dispatcher.Invoke(() =>
+            {
+                if (latest.Length == 0) { Notify("There is no dictation to copy yet."); return; }
+                try { Clipboard.SetText(latest); Notify("Last dictation copied."); } catch { Notify("The clipboard is busy. Try again."); }
+            }),
+            ReviewSpelling: () => Dispatcher.Invoke(ReviewCorrection),
+            ReviewLast: () => Dispatcher.Invoke(ReviewLatest),
+            Cancel: () => Dispatcher.InvokeAsync(CancelAsync),
+            // About takes focus, so like Settings it waits for the dictation to end.
+            About: () => Dispatcher.Invoke(() => { if (busy) Notify("Finish or cancel this dictation before opening About."); else AboutWindow.Open(); }),
+            Quit: () => Dispatcher.InvokeAsync(QuitAsync)));
+        var menuTheme = TrayMenu.FollowTheme(menu);
+        Exit += (_, _) => menuTheme.Dispose();
         tray.ContextMenuStrip = menu; tray.DoubleClick += (_, _) => Dispatcher.Invoke(OpenSettings);
+        TrayMenu.OpenOnLeftClick(tray);
         tray.BalloonTipClicked += (_, _) => Dispatcher.Invoke(() => { if (correction != null) ReviewCorrection(); else ReviewLatest(); });
         // Anything that still escapes is logged (type and stack only) instead of silently ending Sona.
         DispatcherUnhandledException += OnDispatcherUnhandledException;
@@ -556,7 +568,7 @@ internal sealed class App : Application
                 if (Native.GetForegroundWindow() != originalTarget.Window || Native.FocusAt(originalTarget.Window) != (originalTarget.Process, originalTarget.Focus)) break;
                 var result = await session.ObserveAsync();
                 if (cancellation.IsCancellationRequested || !learningLease.Active || !settings.AutoAddToDictionary) break;
-                if (result.Candidate != null) { correction = result.Candidate; Notify("A possible word correction is ready. Review it before adding it to your dictionary."); break; }
+                if (result.Candidate != null) { correction = result.Candidate; Notify("A spelling suggestion is ready. Review it before adding it to your vocabulary."); break; }
                 if (!result.Active) break;
             }
         }
@@ -565,17 +577,17 @@ internal sealed class App : Application
     }
     private void ReviewCorrection()
     {
-        if (correction == null) { Notify("There is no dictionary suggestion to review."); return; }
+        if (correction == null) { Notify("There is no spelling suggestion to review."); return; }
         StopLearning(); var candidate = correction; correction = null;
-        if (MessageBox.Show($"Add “{candidate.Replacement}” to your dictionary?\n\nObserved correction: {candidate.Original} → {candidate.Replacement}\nOnly this word will be saved.", "Review dictionary suggestion", MessageBoxButton.YesNo) != MessageBoxResult.Yes) return;
+        if (MessageBox.Show($"Add this spelling to your vocabulary?\n\n{candidate.Replacement}\n\nObserved correction: {candidate.Original} → {candidate.Replacement}\nOnly this word will be saved.", "Review spelling suggestion", MessageBoxButton.YesNo) != MessageBoxResult.Yes) return;
         try
         {
             var document = JsonNode.Parse(File.ReadAllText(AiPath))?.AsObject() ?? throw new InvalidDataException();
             var words = document["vocabulary"]?.AsArray().Select(v => v!.GetValue<string>()) ?? Enumerable.Empty<string>();
             document["vocabulary"] = JsonSerializer.SerializeToNode(FeatureConfig.Vocabulary(words.Append(candidate.Replacement)));
-            FeatureConfig.WriteAtomic(AiPath, document); Notify("Word added. Manage your dictionary in Settings.");
+            FeatureConfig.WriteAtomic(AiPath, document); Notify("Spelling added. Manage your vocabulary in Settings.");
         }
-        catch { Notify("The dictionary could not be saved. Open Settings to review it."); }
+        catch { Notify("The vocabulary could not be saved. Open Settings to review it."); }
     }
     private async Task QuitAsync()
     {

@@ -70,6 +70,37 @@ jobs:
             if (-not (Test-Path $png)) { throw "Panel preview did not write $name.png" }
             Write-Host "$name.png $((Get-Item $png).Length) bytes"
           }
+          # The credit is the Mac's script logo, not text. Renders are 824x398 px at 200% with the glass at DIP (56, 39).
+          # Where "Intelligence" sits (glass x 200 to 265, y 80 to 98) the logo is chalk on dark and black on light; the
+          # old text credit drew it in blue. The ink ends at the logo's right edge, glass x 286 (pixel 684).
+          Add-Type -AssemblyName System.Drawing
+          foreach ($theme in 'dark', 'light') {
+            $image = [System.Drawing.Bitmap]::new((Join-Path $panel "recording-$theme.png"))
+            try {
+              if ($image.Width -ne 824 -or $image.Height -ne 398) { throw "recording-$theme.png is $($image.Width)x$($image.Height), not 824x398" }
+              $fill = $image.GetPixel(152, 256) # Plain glass left of the credit.
+              if (($theme -eq 'dark') -ne (([int]$fill.R + $fill.G + $fill.B) -lt 384)) { throw "recording-$theme.png glass is $fill, not a $theme fill" }
+              $word = 0; $right = -1
+              for ($y = 238; $y -le 274; $y++) {
+                for ($x = 512; $x -le 642; $x++) {
+                  $p = $image.GetPixel($x, $y)
+                  $low = [Math]::Min([Math]::Min([int]$p.R, [int]$p.G), [int]$p.B)
+                  $high = [Math]::Max([Math]::Max([int]$p.R, [int]$p.G), [int]$p.B)
+                  if ($theme -eq 'dark' -and $low -ge 170 -and ($high - $low) -le 30) { $word++ }
+                  if ($theme -eq 'light' -and $high -le 60) { $word++ }
+                }
+                for ($x = 600; $x -le 700; $x++) {
+                  $p = $image.GetPixel($x, $y)
+                  $difference = [Math]::Abs([int]$p.R - $fill.R) + [Math]::Abs([int]$p.G - $fill.G) + [Math]::Abs([int]$p.B - $fill.B)
+                  if ($difference -gt 40 -and $x -gt $right) { $right = $x }
+                }
+              }
+              Write-Host "recording-$theme.png credit: $word logo pixels where Intelligence sits, ink right edge at x $right"
+              if ($word -lt 100) { throw "recording-$theme.png: the credit is not the script logo ($word chalk or black pixels where Intelligence sits, need 100)" }
+              if ($right -lt 680 -or $right -gt 686) { throw "recording-$theme.png: the credit ink ends at x $right, not at the logo's right edge (680 to 686)" }
+            }
+            finally { $image.Dispose() }
+          }
       - uses: actions/upload-artifact@v4
         if: always()
         with:

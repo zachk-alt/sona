@@ -34,6 +34,82 @@ internal static class WindowsSelfTest
             Check("compact_recording_size", panel.Width == RecordingPanel.PanelWidth && panel.Height == RecordingPanel.PanelHeight && panel.AllowsTransparency);
             using (var activeIcon = TrayIcons.Active()) Check("shared_blue_active_icon", activeIcon.Width > 0 && activeIcon.Height > 0);
             panel.Close();
+            // ---- UI parity checks (0.4.0). Each one fails on the build before its change. ----
+            {
+                // The credit is the Mac's script logo; screen readers call the panel Sona and read the credit as help text.
+                var credited = new RecordingPanel();
+                var creditSurface = (PanelSurface)credited.Content;
+                Check("credit_logo_resources", CreditLogo.For(false) is { PixelWidth: 441, PixelHeight: 54 } && CreditLogo.For(true) is { PixelWidth: 441, PixelHeight: 54 });
+                Check("panel_uia_name_is_sona", System.Windows.Automation.AutomationProperties.GetName(credited) == "Sona"
+                    && System.Windows.Automation.Peers.UIElementAutomationPeer.CreatePeerForElement(credited)?.GetName() == "Sona");
+                Check("panel_credit_is_help_text_not_name", System.Windows.Automation.AutomationProperties.GetName(creditSurface) == ""
+                    && System.Windows.Automation.Peers.UIElementAutomationPeer.CreatePeerForElement(creditSurface)?.GetHelpText() == "by Actual Intelligence Labs");
+                credited.Close();
+
+                // Placed once per appearance, like the Mac: processing and an error keep the spot even when the
+                // target's monitor changes. A fresh appearance takes the new monitor, which proves the seam is live.
+                var steady = new RecordingPanel();
+                (Native.Rect, Native.Rect, double) Screen(int left) =>
+                    (new Native.Rect { Left = left, Top = 0, Right = left + 1600, Bottom = 900 }, new Native.Rect { Left = left, Top = 0, Right = left + 1600, Bottom = 860 }, 1.0);
+                steady.ScreenForTests = () => Screen(0);
+                steady.Recording(0);
+                var recordingSpot = steady.ScreenOrigin;
+                steady.ScreenForTests = () => Screen(2000);
+                steady.Processing();
+                bool processingKept = steady.ScreenOrigin == recordingSpot;
+                steady.ShowError("Sona CI placement check");
+                bool errorKept = steady.ScreenOrigin == recordingSpot;
+                steady.HideNow();
+                steady.Recording(0);
+                var freshSpot = steady.ScreenOrigin;
+                steady.HideNow(); steady.Close();
+                checks["panel_spots"] = $"recording {recordingSpot}, fresh show on the other monitor {freshSpot}";
+                bool freshMoved = freshSpot.X == recordingSpot.X + 2000 && freshSpot.Y == recordingSpot.Y;
+                Check("panel_keeps_spot_processing", processingKept);
+                Check("panel_keeps_spot_error", errorKept);
+                Check("panel_fresh_show_places_again", freshMoved);
+
+                // The tray menu users see: About Sona, the taskbar theme, and a left click that opens the same menu.
+                Action none = () => { };
+                using (var menu = TrayMenu.Build(new TrayMenuActions(none, none, none, none, none, none, none)))
+                {
+                    var labels = menu.Items.OfType<System.Windows.Forms.ToolStripMenuItem>().Select(item => item.Text ?? "").ToArray();
+                    checks["tray_menu_items"] = labels;
+                    Check("tray_menu_about", labels.Contains(TrayMenu.AboutTitle) && Array.IndexOf(labels, TrayMenu.AboutTitle) == labels.Length - 2);
+                    // The Mac's words: "spelling suggestion" and "vocabulary", never "dictionary" or "snippet".
+                    Check("tray_menu_mac_wording", labels.Contains("Review spelling suggestion…")
+                        && !labels.Any(label => label.Contains("ictionary", StringComparison.Ordinal) || label.Contains("nippet", StringComparison.Ordinal)));
+                    TrayMenu.ApplyTheme(menu, light: false);
+                    var darkFill = (menu.Renderer as System.Windows.Forms.ToolStripProfessionalRenderer)?.ColorTable.ToolStripDropDownBackground ?? System.Drawing.Color.White;
+                    Check("tray_menu_dark_theme", SystemParameters.HighContrast
+                        || (0.2126 * darkFill.R + 0.7152 * darkFill.G + 0.0722 * darkFill.B) / 255 < 0.2 && menu.ForeColor.ToArgb() == System.Drawing.Color.White.ToArgb());
+                    TrayMenu.ApplyTheme(menu, light: true);
+                    Check("tray_menu_light_theme", menu.RenderMode == System.Windows.Forms.ToolStripRenderMode.ManagerRenderMode);
+                }
+                Check("tray_left_click_menu_api", TrayMenu.ShowContextMenu != null);
+
+                // About shows the release version and the credits, and the notices it opens ship beside Sona.exe.
+                var release = typeof(App).Assembly.GetName().Version!;
+                var about = new AboutWindow();
+                checks["about_version"] = AboutWindow.VersionLine;
+                Check("about_version_matches_release", AboutWindow.Version == $"{release.Major}.{release.Minor}.{release.Build}" && AboutWindow.VersionLine == "Version " + AboutWindow.Version);
+                Check("about_credits", AboutWindow.Credits.Contains("Parakeet TDT 0.6B v2") && AboutWindow.Credits.Contains("CC BY 4.0")
+                    && AboutWindow.Credits.Contains("sherpa-onnx") && AboutWindow.Credits.Contains("NAudio") && AboutWindow.Credits.Contains("Whisper.net"));
+                Check("about_notices_packaged", File.Exists(AboutWindow.NoticesPath));
+                about.Close();
+
+                // A second launch signals the running Sona to open Settings instead of showing a message box.
+                string reopenName = ReopenSignal.Name + ".SelfTest." + Environment.ProcessId;
+                var reopened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                using (ReopenSignal.Listen(reopenName, () => reopened.TrySetResult()))
+                {
+                    Check("reopen_signal_sent", ReopenSignal.Send(reopenName));
+                    Check("reopen_signal_opens_settings_callback", await Task.WhenAny(reopened.Task, Task.Delay(5000)) == reopened.Task);
+                }
+                // A name nobody listens on (the disposed listener's event can outlive Dispose for a moment).
+                Check("reopen_without_listener_falls_back", !ReopenSignal.Send(reopenName + ".None"));
+            }
+            // ---- End of UI parity checks. ----
             string bridge = Path.Combine(AppContext.BaseDirectory, "bridge", "sona-cleanup.mjs");
             Check("bridge_packaged", File.Exists(bridge));
             Check("assistant_runtime_excluded", new[] { "Sona.Windows.AssistantActionExecutor", "Sona.Windows.AssistantActionWorker", "Sona.Windows.AssistantCursor", "Sona.Windows.AssistantUserActivity", "Sona.Windows.AssistantPanel", "Sona.Windows.AssistantSettingsWindow", "Sona.Windows.WindowInvocation", "Sona.Windows.WindowContextWorker", "Sona.Windows.SessionActivity" }.All(name => typeof(App).Assembly.GetType(name) == null));
