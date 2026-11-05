@@ -328,6 +328,7 @@ internal static class WindowsSelfTest
             var current = await TextInsertion.CaptureAsync(allowOwnProcess: true);
             Check("safe_paste_accepted", current != null && await TextInsertion.PasteAsync(current, "Sona ✓"));
             Check("safe_paste_unicode_text", a.Text == "Before Sona ✓");
+            await TextInsertion.LastRestore; // The restore waits 1 s after the paste, like the Mac.
             Check("clipboard_restored", Clipboard.GetText() == "Sona CI clipboard sentinel");
             password.Focus(); Keyboard.Focus(password); await Task.Delay(100);
             Check("password_rejected", await TextInsertion.CaptureAsync(allowOwnProcess: true) == null);
@@ -467,6 +468,16 @@ internal static class WindowsSelfTest
         var warmed = await transcriber.TranscribeAsync(samples, route, cancellation.Token, null);
         checks["pipeline_first_decode_after_warmup_seconds"] = Math.Round(watch.Elapsed.TotalSeconds, 2);
         Check("pipeline_warmed_parakeet_first_decode", warmed.Engine == SpeechEngine.Parakeet && warmed.Text.ToLowerInvariant().Contains("country"));
+        // A recording over 20 s is decoded in pieces cut at pauses: four copies of the fixture with 1 s of silence
+        // between them must come back as four sentences, none lost at a cut.
+        var gap = new float[SpeechAudio.SampleRate];
+        float[] longRecording = [.. samples, .. gap, .. samples, .. gap, .. samples, .. gap, .. samples];
+        watch.Restart();
+        var pieces = await transcriber.TranscribeAsync(longRecording, route, cancellation.Token, null);
+        checks["pipeline_long_recording_seconds"] = Math.Round(watch.Elapsed.TotalSeconds, 2);
+        checks["pipeline_long_recording_pieces"] = SpeechAudio.SpeechPieces(longRecording).Count;
+        int sentences = pieces.Text.ToLowerInvariant().Split("americans").Length - 1;
+        Check("pipeline_long_recording_in_pieces", pieces.Engine == SpeechEngine.Parakeet && SpeechAudio.SpeechPieces(longRecording).Count > 1 && sentences == 4);
         // The bridge takes the strict mode Windows now sends for code editors and terminals.
         string bridge = Path.Combine(AppContext.BaseDirectory, "bridge", "sona-cleanup.mjs");
         string config = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(output))!, "selftest-pipeline-ai.json");

@@ -23,11 +23,11 @@ public static class FeatureConfig
     public static Snippet[] Snippets(IEnumerable<Snippet> values)
     {
         var source = values.ToArray();
-        if (source.Any(v => v == null || v.Trigger == null || v.Expansion == null)) throw new InvalidDataException("Snippet fields must be strings.");
+        if (source.Any(v => v == null || v.Trigger == null || v.Expansion == null)) throw new InvalidDataException("Each saved phrase needs a text trigger and text.");
         var result = source.Select(v => new Snippet(v.Trigger.Trim(), v.Expansion)).ToArray();
         if (result.Length > 128 || result.Any(v => string.IsNullOrWhiteSpace(v.Trigger) || v.Trigger.EnumerateRunes().Count() > 120 || v.Trigger.Any(c => IsControl(c) || c is '\u2028' or '\u2029') || string.IsNullOrWhiteSpace(v.Expansion) || Encoding.UTF8.GetByteCount(v.Expansion) > 8192 || v.Expansion.Any(c => IsControl(c) && c is not ('\t' or '\n' or '\r'))) || result.Sum(v => Encoding.UTF8.GetByteCount(v.Expansion)) > 65536)
-            throw new InvalidDataException("Each snippet needs a trigger up to 120 characters and an expansion up to 8 KB; at most 128 snippets and 64 KB of expansions.");
-        if (result.Select(v => v.Trigger).Distinct(StringComparer.OrdinalIgnoreCase).Count() != result.Length) throw new InvalidDataException("Snippet triggers must be unique.");
+            throw new InvalidDataException("Each saved phrase needs a trigger of 1 to 120 characters and text up to 8 KB. Keep it to 128 phrases and 64 KB of text in all.");
+        if (result.Select(v => v.Trigger).Distinct(StringComparer.OrdinalIgnoreCase).Count() != result.Length) throw new InvalidDataException("Each saved phrase needs its own trigger.");
         return result;
     }
     public static void CommitDocuments(params (string Path, JsonObject Document)[] documents)
