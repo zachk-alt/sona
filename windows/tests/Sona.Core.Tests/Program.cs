@@ -711,6 +711,10 @@ Check(!leases.TryReuse(11, out _), "after the restore a new paste snapshots agai
 leases.Begin(20, null);
 Check(!leases.TryReuse(21, out _), "a copy by the user after the paste ends reuse");
 Check(leases.TryReuse(20, out var emptySnapshot) && emptySnapshot == null, "an empty user clipboard is kept as empty");
+
+// Cancel and stall messages (parity UI-F8): an overrun says it stalled, in the panel; a user cancel says nothing.
+Check(DictationOutcome.Cancelled(byUser: false, quitting: false) == "Transcription stalled. Try again.", "a 120 s overrun shows the Mac's stall message");
+Check(DictationOutcome.Cancelled(byUser: true, quitting: false) == null && DictationOutcome.Cancelled(byUser: false, quitting: true) == null, "a user cancel or a quit shows nothing");
 Console.WriteLine($"{tests} checks passed.");
 return 0;
 

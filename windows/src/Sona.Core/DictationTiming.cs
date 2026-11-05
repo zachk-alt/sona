@@ -23,6 +23,14 @@ public static class DictationDeadlines
     public const double ParakeetBaseSeconds = 6, ParakeetSecondsPerRecordedSecond = 0.3, ParakeetCapSeconds = 45;
 }
 
+/// What the panel says when a dictation's work was cancelled. The session budget running out shows the Mac's stall
+/// message; a cancel the user chose, or a quit, shows nothing.
+public static class DictationOutcome
+{
+    public const string Stalled = "Transcription stalled. Try again.";
+    public static string? Cancelled(bool byUser, bool quitting) => byUser || quitting ? null : Stalled;
+}
+
 public enum EngineOutcome { Completed, Busy, TimedOut }
 public sealed record EngineRun<T>(EngineOutcome Outcome, T? Value);
 

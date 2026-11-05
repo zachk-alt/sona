@@ -48,7 +48,7 @@ internal sealed class App : Application
     private bool ready, busy, recording, quitting;
     private string latest = "";
     // Numbers each dictation, and names the one whose text is in latest, so a late result never replaces newer text.
-    private int session, deliveredSession;
+    private int session, deliveredSession, cancelledSession;
     // Strict cleanup for code editors and terminals, from the app focused when the dictation started.
     private CleanupMode sessionMode;
     private string? sessionFailure;
@@ -351,7 +351,8 @@ internal sealed class App : Application
                 _ = ObserveCorrectionsAsync(learningSession, target!, learningCancellation.Token);
             }
         }
-        catch (OperationCanceledException) { if (!quitting) Notify("Dictation cancelled."); }
+        // The 120 s budget ran out: the panel says so, like the Mac. A cancel the user chose shows nothing.
+        catch (OperationCanceledException) { sessionFailure = DictationOutcome.Cancelled(cancelledSession == id, quitting); }
         catch (Exception e)
         {
             // Whisper.net caches a failed native load for the life of the process, so a repair needs a restart
@@ -365,6 +366,7 @@ internal sealed class App : Application
     private async Task CancelAsync()
     {
         StopLearning();
+        if (busy) cancelledSession = session;
         operation?.Cancel();
         if (recording)
         {
@@ -380,8 +382,8 @@ internal sealed class App : Application
     {
         if (quitting || deliveredSession >= id) return;
         latest = text; deliveredSession = id;
-        // Only while nothing newer owns the panel.
-        if (!busy) ShowPanel(() => { if (panel != null) panel.ShowError("Text is ready in Copy last dictation."); else Notify("Text is ready in Copy last dictation."); });
+        // Only while nothing newer owns the panel, and never after a cancel the user chose.
+        if (!busy && cancelledSession != id) ShowPanel(() => { if (panel != null) panel.ShowError("Text is ready in Copy last dictation."); else Notify("Text is ready in Copy last dictation."); });
     }
     private static string? ProcessName(uint id)
     {
