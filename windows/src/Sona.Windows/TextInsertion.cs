@@ -89,20 +89,26 @@ internal static class TextInsertion
         // delay-rendered formats make the clipboard owner render on demand and WPF's Clipboard class
         // sleeps between retries. Each step has a deadline. A missed one ends automatic paste (the text
         // stays in Copy last dictation) while the step finishes, or not, on its own thread.
-        using var clipboard = await ClipboardSession.StartAsync();
+        var clipboard = await ClipboardSession.StartAsync();
         if (clipboard == null) return false; // Earlier clipboard threads are still stuck in an unresponsive owner.
         bool setRequested = false;
+        long pastedAt = 0;
+        ClipboardLeases<IDataObject>.Lease? lease = null;
         try
         {
+            // A paste before the previous one's restore keeps the user's snapshot, never Sona's own text.
+            if (Leases.TryReuse(Native.GetClipboardSequenceNumber(), out var kept)) await clipboard.AdoptAsync(kept).WaitAsync(SnapshotDeadline);
             // Eager snapshot before changing clipboard ownership. Refuse automatic paste if any
             // native format cannot be materialized; do not silently destroy rich clipboard data.
-            if (!await clipboard.SnapshotAsync().WaitAsync(SnapshotDeadline)) return false;
+            else if (!await clipboard.SnapshotAsync().WaitAsync(SnapshotDeadline)) return false;
             if (!Matches() || Native.AnyModifierHeld() || validate != null && !await validate()) return false;
             setRequested = true;
             if (!await clipboard.SetAsync(text).WaitAsync(SetDeadline)) return false;
+            lease = Leases.Begin(clipboard.Sequence, clipboard.Snapshot);
             if (!Matches() || Native.AnyModifierHeld() || validate != null && !await validate()) return false;
             if (!Matches() || !(commit ?? new OneShotCommit()).TryBegin(true)) return false;
             if (Native.Paste() != 4) return false; // UIPI blocks input to higher-integrity apps.
+            pastedAt = Environment.TickCount64;
             await Task.Delay(450); // Allow the focused app to consume a normal paste message.
             return true;
         }
@@ -110,8 +116,26 @@ internal static class TextInsertion
         finally
         {
             // Queued behind the set on the clipboard thread, so it also runs after a set that missed its deadline.
-            if (setRequested) { try { await clipboard.RestoreAsync().WaitAsync(RestoreDeadline); } catch (Exception e) when (e is not OutOfMemoryException) { } }
+            // After a paste the restore waits out the rest of ClipboardRestoreDelay on its own, so the dictation is not
+            // held busy; without one it runs now.
+            if (!setRequested) clipboard.Dispose();
+            else if (pastedAt != 0) LastRestore = RestoreLaterAsync(clipboard, lease, InsertionPolicy.ClipboardRestoreDelay - TimeSpan.FromMilliseconds(Environment.TickCount64 - pastedAt));
+            else await RestoreLaterAsync(clipboard, lease, TimeSpan.Zero);
         }
+    }
+    private static readonly ClipboardLeases<IDataObject> Leases = new();
+    /// The newest delayed restore, for checks that read the clipboard after it. It never throws.
+    internal static Task LastRestore { get; private set; } = Task.CompletedTask;
+    // Only the newest paste restores; an older one whose lease was taken over leaves the clipboard to it.
+    private static async Task RestoreLaterAsync(ClipboardSession clipboard, ClipboardLeases<IDataObject>.Lease? lease, TimeSpan wait)
+    {
+        try
+        {
+            if (wait > TimeSpan.Zero) await Task.Delay(wait);
+            if (lease == null || Leases.End(lease)) await clipboard.RestoreAsync().WaitAsync(RestoreDeadline);
+        }
+        catch (Exception e) when (e is not OutOfMemoryException) { }
+        finally { clipboard.Dispose(); }
     }
     private static readonly TimeSpan SnapshotDeadline = TimeSpan.FromMilliseconds(1000), SetDeadline = TimeSpan.FromMilliseconds(1500), RestoreDeadline = TimeSpan.FromMilliseconds(2000);
 }
@@ -123,10 +147,10 @@ internal sealed class ClipboardSession : IDisposable
     private const int MaxLive = 3; // This paste plus at most two threads abandoned in an unresponsive owner.
     private static int live;
     private readonly Dispatcher dispatcher;
-    // Touched only on the clipboard thread.
-    private IDataObject? previous;
+    // Written only on the clipboard thread.
+    private volatile IDataObject? previous;
     private bool changed;
-    private uint ours;
+    private volatile uint ours;
 
     private ClipboardSession(Dispatcher dispatcher) { this.dispatcher = dispatcher; }
 
@@ -169,6 +193,13 @@ internal sealed class ClipboardSession : IDisposable
         }
         catch (Exception e) when (e is not OutOfMemoryException) { return false; }
     }).Task;
+
+    /// The snapshot this session restores, and the clipboard sequence its own text got. Read after the step's task.
+    public IDataObject? Snapshot => previous;
+    public uint Sequence => ours;
+
+    /// Restores an earlier paste's snapshot of the user's clipboard instead of taking a new one.
+    public Task AdoptAsync(IDataObject? snapshot) => dispatcher.InvokeAsync(() => { previous = snapshot; }).Task;
 
     public Task<bool> SetAsync(string text) => dispatcher.InvokeAsync(() =>
     {

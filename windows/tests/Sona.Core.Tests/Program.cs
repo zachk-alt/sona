@@ -698,6 +698,19 @@ using (var strictRequest = System.Text.Json.JsonDocument.Parse(BridgeProtocol.Di
 using (var proseRequest = System.Text.Json.JsonDocument.Parse(BridgeProtocol.Dictate("hello there", false)))
     Check(strictRequest.RootElement.GetProperty("mode").GetString() == "strict" && strictRequest.RootElement.GetProperty("cleanupEnabled").GetBoolean()
         && proseRequest.RootElement.GetProperty("mode").GetString() == "prose" && proseRequest.RootElement.GetProperty("operation").GetString() == "dictate", "the dictate request carries the cleanup mode");
+
+// Clipboard restore (parity P-F15): 1 s after the paste, and a second paste before it keeps the user's snapshot.
+Check(InsertionPolicy.ClipboardRestoreDelay == TimeSpan.FromSeconds(1), "the clipboard comes back 1 s after the paste, like the Mac");
+var leases = new ClipboardLeases<string>();
+Check(!leases.TryReuse(5, out _), "the first paste takes its own snapshot");
+var firstLease = leases.Begin(10, "user clipboard");
+Check(leases.TryReuse(10, out var keptSnapshot) && keptSnapshot == "user clipboard", "a paste before the first restore reuses the user's snapshot, not Sona's text");
+var secondLease = leases.Begin(11, keptSnapshot);
+Check(!leases.End(firstLease) && leases.End(secondLease) && secondLease.Original == "user clipboard", "only the newest paste restores, and it restores the user's clipboard");
+Check(!leases.TryReuse(11, out _), "after the restore a new paste snapshots again");
+leases.Begin(20, null);
+Check(!leases.TryReuse(21, out _), "a copy by the user after the paste ends reuse");
+Check(leases.TryReuse(20, out var emptySnapshot) && emptySnapshot == null, "an empty user clipboard is kept as empty");
 Console.WriteLine($"{tests} checks passed.");
 return 0;
 

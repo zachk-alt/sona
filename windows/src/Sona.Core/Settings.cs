@@ -109,4 +109,49 @@ public static class InsertionPolicy
         expectedWindow == currentWindow && expectedProcess == currentProcess && expectedFocus == currentFocus;
 
     public static bool MayRestoreClipboard(uint ourSequence, uint currentSequence) => ourSequence != 0 && ourSequence == currentSequence;
+    /// Paste to clipboard restore, the Mac's 1 s. A busy Electron app, a remote desktop or a VM can read the clipboard
+    /// well after the paste message, and would paste the user's old clipboard if it came back sooner.
+    public static readonly TimeSpan ClipboardRestoreDelay = TimeSpan.FromMilliseconds(1000);
+}
+
+/// The Mac's ClipboardLease rule (TextInserter.swift). A paste that starts while the clipboard still holds the previous
+/// paste's text, before that paste's delayed restore, keeps the user's snapshot that restore would have put back,
+/// instead of saving Sona's own text as the user's clipboard. Only the newest paste restores.
+public sealed class ClipboardLeases<T> where T : class
+{
+    public sealed class Lease
+    {
+        internal Lease(uint sequence, T? original) { Sequence = sequence; Original = original; }
+        public uint Sequence { get; }
+        /// Null when the user's clipboard was empty.
+        public T? Original { get; }
+    }
+
+    private readonly object gate = new();
+    private Lease? current;
+
+    /// The snapshot a new paste keeps, when the clipboard is still the newest paste's text (its sequence unchanged).
+    public bool TryReuse(uint sequenceNow, out T? original)
+    {
+        lock (gate)
+        {
+            bool reuse = current != null && current.Sequence != 0 && current.Sequence == sequenceNow;
+            original = reuse ? current!.Original : null;
+            return reuse;
+        }
+    }
+
+    /// A paste set its text: it becomes the newest lease, and any earlier one will not restore.
+    public Lease Begin(uint sequence, T? original) { lock (gate) return current = new(sequence, original); }
+
+    /// True only for the newest lease, which then ends. An older paste's late restore gets false and does nothing.
+    public bool End(Lease lease)
+    {
+        lock (gate)
+        {
+            if (!ReferenceEquals(current, lease)) return false;
+            current = null;
+            return true;
+        }
+    }
 }
