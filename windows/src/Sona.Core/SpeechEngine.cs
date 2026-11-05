@@ -66,3 +66,14 @@ public static class WhisperText
         return text.ToString().Trim();
     }
 }
+
+/// Parakeet TDT 0.6B v2 text as the user should see it. The model's "$" token carries no word-start marker, so every
+/// dollar amount came out joined to the word before it ("the price range is$20,000 to$40,000": 9 of 9 on the
+/// 2026-11-05 bench). A "$" right after a letter or a comma, colon or semicolon and right before a digit gets its space back.
+public static class ParakeetText
+{
+    private static readonly System.Text.RegularExpressions.Regex GluedDollar =
+        new(@"(?<=[\p{L},;:])\$(?=\d)", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    public static string Tidy(string text) => GluedDollar.Replace(text, " $");
+}

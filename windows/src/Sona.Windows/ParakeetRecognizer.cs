@@ -48,7 +48,7 @@ internal sealed class ParakeetRecognizer : IDisposable
             using var stream = current.CreateStream();
             stream.AcceptWaveform(SampleRate, start == 0 && length == samples.Length ? samples : samples[start..(start + length)]);
             current.Decode(stream);
-            string text = stream.Result.Text.Trim();
+            string text = ParakeetText.Tidy(stream.Result.Text.Trim());
             if (text.Length > 0) texts.Add(text);
         }
         return string.Join(' ', texts);
