@@ -298,6 +298,7 @@ final class AudioCapture: AudioCapturing {
     // MARK: - Audio thread
 
     private func process(_ buffer: AVAudioPCMBuffer) {
+        PCMSamples.zeroNonFinite(buffer)
         framesLock.withLock { framesDelivered &+= Int(buffer.frameLength) }
         updateLevel(from: buffer)
         updateSpectrum(from: buffer)

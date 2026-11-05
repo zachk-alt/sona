@@ -194,6 +194,61 @@ func testChannelMix() {
     check(mono.map { abs($0) < 0.5 } == true, "A mono mic passes at full level (got \(String(describing: mono)))")
 }
 
+/// A bad sample (NaN or infinity) reads as silence at any channel count, as
+/// on Windows, before the level meter, the mix or the converter sees it.
+func testBadSamples() {
+    let bad: [Float] = [.nan, .infinity, -.infinity, .signalingNaN]
+    for (channels, interleaved) in [(1, false), (1, true), (2, false), (2, true)] as [(AVAudioChannelCount, Bool)] {
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48000, channels: channels, interleaved: interleaved)!
+        let b = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 480)!
+        b.frameLength = 480
+        let count = interleaved ? 480 * Int(channels) : 480
+        let pointers = interleaved ? 1 : Int(channels)
+        for p in 0..<pointers { for i in 0..<count { b.floatChannelData![p][i] = 0.25 } }
+        // Near the start and near the end of the data, so a scan that stops after frameLength interleaved samples misses one.
+        let spots = bad.indices.map { 10 + $0 * 7 } + bad.indices.map { count - 1 - $0 * 7 }
+        for (n, spot) in spots.enumerated() { b.floatChannelData![pointers - 1][spot] = bad[n % bad.count] }
+        PCMSamples.zeroNonFinite(b)
+        var finite = true, kept = true
+        for p in 0..<pointers {
+            for i in 0..<count {
+                let v = b.floatChannelData![p][i]
+                if !v.isFinite { finite = false }
+                let wasBad = p == pointers - 1 && spots.contains(i)
+                if wasBad ? v != 0 : v != 0.25 { kept = false }
+            }
+        }
+        check(finite && kept, "\(channels) channel\(channels == 1 ? "" : "s")\(interleaved ? ", interleaved" : ""): bad samples read as 0, the rest are untouched")
+        // Only the frames in use are read: a bad value past frameLength is left alone.
+        b.frameLength = 240
+        let past = interleaved ? 240 * Int(channels) : 240
+        b.floatChannelData![0][past] = .nan
+        PCMSamples.zeroNonFinite(b)
+        check(b.floatChannelData![0][past].isNaN, "\(channels) channel\(channels == 1 ? "" : "s")\(interleaved ? ", interleaved" : ""): samples past frameLength are not touched")
+        // Through the converter the speech engine gets only finite audio.
+        let speech = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
+        guard let converter = try? CaptureConverter(from: format, to: speech) else { check(false, "A converter is created"); continue }
+        var out: [Float] = []
+        for _ in 0..<5 {
+            let c = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 480)!
+            c.frameLength = 480
+            for p in 0..<pointers { for i in 0..<count { c.floatChannelData![p][i] = Float(sin(Double(i) / 9)) * 0.25 } }
+            c.floatChannelData![0][50] = .nan
+            PCMSamples.zeroNonFinite(c)
+            if let o = converter.convert(c), let f = o.floatChannelData?[0] { out += UnsafeBufferPointer(start: f, count: Int(o.frameLength)) }
+        }
+        out += converter.flush().flatMap { o in UnsafeBufferPointer(start: o.floatChannelData![0], count: Int(o.frameLength)) }
+        check(!out.isEmpty && out.allSatisfy(\.isFinite), "\(channels) channel\(channels == 1 ? "" : "s")\(interleaved ? ", interleaved" : ""): the converted audio is all finite")
+    }
+    // Int16 audio cannot hold a bad sample and is left as it is.
+    let int16 = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 48000, channels: 1, interleaved: true)!
+    let s = AVAudioPCMBuffer(pcmFormat: int16, frameCapacity: 8)!
+    s.frameLength = 8
+    for i in 0..<8 { s.int16ChannelData![0][i] = Int16(i * 1000 - 4000) }
+    PCMSamples.zeroNonFinite(s)
+    check((0..<8).allSatisfy { s.int16ChannelData![0][$0] == Int16($0 * 1000 - 4000) }, "Int16 audio is left untouched")
+}
+
 
 // MARK: - Debug text log (M7) and session metrics (M6)
 
@@ -351,6 +406,7 @@ struct DictationPipelineMain {
         testTranscriptAssembler()
         testCaptureConverter()
         testChannelMix()
+        testBadSamples()
         testDebugTextLog()
         testDebugTextLogConfig()
         testDebugTextLogReadsConfigEachWrite()

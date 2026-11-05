@@ -659,6 +659,7 @@ Check(fourWav.Length == 32000 && Math.Abs(ToneDb(fourWav, 1000) + 12.04) < 0.1, 
 var stereoWav = SpeechAudio.Mono16k(Wav(new NAudio.Wave.WaveFormat(44100, 16, 2), Channels(Tone(1000, 44100, 2), Tone(1000, 44100, 2))));
 Check(stereoWav.Length == 32000 && Math.Abs(ToneDb(stereoWav, 1000)) < 0.1, "a 16-bit stereo 44.1 kHz WAV becomes 16 kHz mono at the right level");
 Check(ParakeetText.Tidy("the price range is$20,000 to$40,000.") == "the price range is $20,000 to $40,000.", "Parakeet dollar amounts get their space back");
+Check(ParakeetText.Tidy("That was expensive.$500 for one chair. Really?$20!$30 (tax included)$40 [est.]$9") == "That was expensive. $500 for one chair. Really? $20! $30 (tax included) $40 [est.] $9", "a dollar amount after sentence punctuation or a closing bracket gets its space back");
 Check(ParakeetText.Tidy("It costs $5, or,$6 and $7.50") == "It costs $5, or, $6 and $7.50" && ParakeetText.Tidy("echo $HOME and 5$") == "echo $HOME and 5$", "a spaced dollar, a shell variable and a trailing sign are left alone");
 // Long recordings: Parakeet decodes pieces cut at the quietest 0.3 s between 10 and 20 s after the previous cut.
 float[] Speechy(double seconds, params (double From, double To)[] quiet)

@@ -11,6 +11,22 @@ enum PCMSamples {
         format.commonFormat == .pcmFormatFloat32 || format.commonFormat == .pcmFormatInt16
     }
 
+    /// Sets every non-finite Float32 sample (NaN or infinity) to 0 in place, at
+    /// any channel count, as Windows' mono mixer does, so one bad sample from a
+    /// microphone cannot reach the level meter or spread through the converter's
+    /// filter. Int16 audio cannot hold one and is left alone.
+    static func zeroNonFinite(_ buffer: AVAudioPCMBuffer) {
+        guard buffer.format.commonFormat == .pcmFormatFloat32, let data = buffer.floatChannelData else { return }
+        let channels = Int(buffer.format.channelCount), frames = Int(buffer.frameLength)
+        // Interleaved audio has one data pointer holding every channel.
+        let interleaved = buffer.format.isInterleaved
+        let pointers = interleaved ? 1 : channels, count = interleaved ? frames * channels : frames
+        for p in 0..<pointers {
+            let samples = data[p]
+            for i in 0..<count where !samples[i].isFinite { samples[i] = 0 }
+        }
+    }
+
     /// Every sample, frame by frame in channel order, as SpeechActivity.add expects.
     static func interleaved(_ buffer: AVAudioPCMBuffer) -> [Float]? {
         let channels = Int(buffer.format.channelCount)

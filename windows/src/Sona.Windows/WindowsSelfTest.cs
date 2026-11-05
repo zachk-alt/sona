@@ -318,6 +318,33 @@ internal static class WindowsSelfTest
                 Send([Key(0x79, true), Key(0xA4, true), Key(0xA2, true)]); await Task.Delay(150);
                 checks["dictation_chord_hold_gestures"] = string.Join(",", gestures);
                 Check("dictation_chord_hold_finishes", gestures.SequenceEqual([DictationGestureEvent.Begin, DictationGestureEvent.Commit]));
+                // A held chord key's auto-repeat never reaches the focused app (the hook swallows it, as the Mac does),
+                // while another key still does. The filter sees every key message this window's thread receives; the
+                // chord's first down goes to RegisterHotKey, which keeps it from the app too. The second repeat comes
+                // after Ctrl and Alt are up, where only the hook can keep it out (F10 alone is not the hotkey). Ctrl
+                // comes up before Alt, so Windows never reads a lone Alt release as a request for the window menu.
+                gestures.Clear();
+                int chordDowns = 0, otherDowns = 0;
+                ThreadMessageEventHandler filter = (ref MSG msg, ref bool handled) =>
+                {
+                    if (msg.message is not (0x100 or 0x104)) return;
+                    if (msg.wParam == 0x79) chordDowns++;
+                    else if (msg.wParam == 0x7C) otherDowns++;
+                };
+                ComponentDispatcher.ThreadFilterMessage += filter;
+                try
+                {
+                    Send([Key(0x7C, false), Key(0x7C, true)]); await Task.Delay(150);
+                    Send([Key(0xA2, false), Key(0xA4, false), Key(0x79, false)]); await Task.Delay(200);
+                    Send([Key(0x79, false)]); await Task.Delay(200); // auto-repeat with Ctrl and Alt still down
+                    Send([Key(0xA2, true), Key(0xA4, true)]); await Task.Delay(100);
+                    Send([Key(0x79, false)]); await Task.Delay(300); // auto-repeat after Ctrl and Alt are up
+                    Send([Key(0x79, true)]); await Task.Delay(150);
+                }
+                finally { ComponentDispatcher.ThreadFilterMessage -= filter; }
+                checks["dictation_chord_repeat_keys"] = $"chord {chordDowns}, other {otherDowns}, gestures {string.Join(",", gestures)}";
+                Check("dictation_chord_repeat_swallowed", otherDowns == 1 && chordDowns == 0
+                    && gestures.SequenceEqual([DictationGestureEvent.Begin, DictationGestureEvent.Commit]));
             }
             oldClipboard = Clipboard.GetDataObject();
             Clipboard.SetText("Sona CI clipboard sentinel"); touchedClipboard = true;

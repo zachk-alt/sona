@@ -232,7 +232,10 @@ internal sealed class HotkeyService : IDisposable
                 else if (down)
                 {
                     // Never the first down (RegisterHotKey needs it) and never a key up (that would leave the key stuck).
-                    bool swallow = !shortcut.IsModifierOnly && owner.LiveRepeat(this);
+                    // A low-level hook runs before Windows updates the key's async state, so Held reads the state before
+                    // this down: true only for a real auto-repeat. A fresh press after a release the hook never saw (an
+                    // elevated window had focus) reads up and is not swallowed, even though the gesture still thinks it is down.
+                    bool swallow = !shortcut.IsModifierOnly && Held(shortcut.VirtualKey) && owner.LiveRepeat(this);
                     owner.Route(this, Step.Down, Environment.TickCount64, DictationGesture.Clean(shortcut, Held));
                     if (swallow) return 1;
                 }

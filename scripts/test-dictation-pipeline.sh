@@ -14,3 +14,10 @@ swiftc -swift-version 5 -D SONA_TEST_LOG -module-cache-path "$out/module-cache" 
   Sources/Murmur/AudioCapture.swift Sources/Murmur/PCMSamples.swift Sources/Murmur/DictationMetrics.swift Sources/Murmur/Config.swift \
   Sources/Murmur/HotKeyBinding.swift Sources/Murmur/DebugTextLog.swift Tests/DictationPipelineTests.swift -o "$out/tests"
 "$out/tests"
+# Every microphone buffer is cleaned before the level meter, the mix or the
+# converter reads it: zeroNonFinite must be the first line of process(_:).
+first=$(awk '/private func process\(_ buffer: AVAudioPCMBuffer\) \{/ { getline; print; exit }' Sources/Murmur/AudioCapture.swift)
+case "$first" in
+  *"PCMSamples.zeroNonFinite(buffer)"*) echo "AudioCapture.process cleans bad samples first." ;;
+  *) echo "FAILED: AudioCapture.process must start with PCMSamples.zeroNonFinite(buffer), got: $first"; exit 1 ;;
+esac
