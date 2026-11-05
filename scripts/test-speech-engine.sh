@@ -12,7 +12,7 @@ clang -fobjc-arc -fmodules -c Sources/SonaObjC/SonaObjC.m -I Sources/SonaObjC/in
 swiftc -swift-version 5 -D SONA_TEST_LOG -module-cache-path "$out/module-cache" \
   -I Sources/SonaObjC/include "$out/SonaObjC.o" \
   Sources/Murmur/FrameworkException.swift Sources/Murmur/Log.swift Sources/Murmur/Transcriber.swift \
-  Sources/Murmur/Config.swift Sources/Murmur/HotKeyBinding.swift Sources/Murmur/SpeechActivity.swift \
+  Sources/Murmur/Config.swift Sources/Murmur/HotKeyBinding.swift Sources/Murmur/SpeechActivity.swift Sources/Murmur/PCMSamples.swift \
   Sources/Murmur/ParakeetModelStore.swift Sources/Murmur/SpeechEngine.swift Sources/Murmur/ThirdPartyCredits.swift \
   Tests/SpeechEngineTests.swift -o "$out/tests"
 "$out/tests"

@@ -6,9 +6,10 @@ import Foundation
 /// speech is enough windows clearly above that floor and above an absolute
 /// minimum, so steady room noise at any level types nothing.
 ///
-/// Parakeet runs over the whole recording at once, so a silent press would
-/// otherwise reach the model with nothing to hear. No speech means an empty
-/// result, and an empty result types nothing.
+/// Every engine is checked, as on Windows: Parakeet runs over the whole
+/// recording at once, so a silent press would reach the model with nothing to
+/// hear, and Apple can type a stray word over room noise. No speech means an
+/// empty result, and an empty result types nothing.
 struct SpeechActivity {
     static let windowSeconds = 0.03
     /// Share of windows, quietest first, that marks the noise floor.
