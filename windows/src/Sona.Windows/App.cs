@@ -87,7 +87,15 @@ internal sealed class App : Application
             MessageBox.Show("This Sona build requires Windows 11 x64. ARM64 and Windows 10 are not supported by this release.", "Sona"); Shutdown(1); return;
         }
         instance = new Mutex(true, "Local\\Sona.Dictation", out bool first);
-        if (!first) { MessageBox.Show("Sona is already running in the system tray.", "Sona"); Shutdown(); return; }
+        if (!first)
+        {
+            // Opens Settings in the running Sona (it refuses during a dictation), like reopening the Mac app. The
+            // message stays only for the moment before the first launch starts listening.
+            if (!ReopenSignal.Send(ReopenSignal.Name)) MessageBox.Show("Sona is already running in the system tray.", "Sona");
+            Shutdown(); return;
+        }
+        var reopen = ReopenSignal.Listen(ReopenSignal.Name, OpenSettings);
+        Exit += (_, _) => reopen.Dispose();
         Directory.CreateDirectory(data);
         settings = SettingsStore.Load(ConfigPath);
         using var resource = GetResourceStream(new Uri("pack://application:,,,/Assets/Sona.ico"))!.Stream;

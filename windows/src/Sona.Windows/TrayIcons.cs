@@ -123,6 +123,37 @@ internal static class TrayMenu
     }
 }
 
+/// A second launch asks the running Sona to open Settings, as reopening the Mac app pops its menu. Windows 11
+/// can hide the tray icon in the overflow, so launching Sona again from Start is the way back in.
+internal static class ReopenSignal
+{
+    internal const string Name = "Local\\Sona.Dictation.Open";
+
+    /// Runs open on this (UI) thread each time a later launch signals, until disposed. A registered wait holds
+    /// no thread, and no dictation waits on it.
+    internal static IDisposable Listen(string name, Action open)
+    {
+        var signal = new EventWaitHandle(false, EventResetMode.AutoReset, name);
+        var dispatcher = System.Windows.Threading.Dispatcher.CurrentDispatcher;
+        var registration = ThreadPool.RegisterWaitForSingleObject(signal, (_, _) => dispatcher.BeginInvoke(open), null, Timeout.Infinite, false);
+        return new Disposer(() => { registration.Unregister(null); signal.Dispose(); });
+    }
+
+    /// Signals the running Sona. False when none is listening yet.
+    internal static bool Send(string name)
+    {
+        if (!EventWaitHandle.TryOpenExisting(name, out var signal)) return false;
+        using (signal)
+        {
+            // This launch holds the user's foreground right; pass it on so Settings can come to the front.
+            AllowSetForegroundWindow(-1);
+            return signal.Set();
+        }
+    }
+
+    [DllImport("user32.dll")] private static extern bool AllowSetForegroundWindow(int processId);
+}
+
 internal sealed class Disposer(Action dispose) : IDisposable
 {
     private Action? pending = dispose;

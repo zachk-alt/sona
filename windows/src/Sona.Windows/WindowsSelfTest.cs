@@ -94,6 +94,16 @@ internal static class WindowsSelfTest
                     && AboutWindow.Credits.Contains("sherpa-onnx") && AboutWindow.Credits.Contains("NAudio") && AboutWindow.Credits.Contains("Whisper.net"));
                 Check("about_notices_packaged", File.Exists(AboutWindow.NoticesPath));
                 about.Close();
+
+                // A second launch signals the running Sona to open Settings instead of showing a message box.
+                string reopenName = ReopenSignal.Name + ".SelfTest." + Environment.ProcessId;
+                var reopened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                using (ReopenSignal.Listen(reopenName, () => reopened.TrySetResult()))
+                {
+                    Check("reopen_signal_sent", ReopenSignal.Send(reopenName));
+                    Check("reopen_signal_opens_settings_callback", await Task.WhenAny(reopened.Task, Task.Delay(5000)) == reopened.Task);
+                }
+                Check("reopen_without_listener_falls_back", !ReopenSignal.Send(reopenName));
             }
             // ---- End of UI parity checks. ----
             string bridge = Path.Combine(AppContext.BaseDirectory, "bridge", "sona-cleanup.mjs");
