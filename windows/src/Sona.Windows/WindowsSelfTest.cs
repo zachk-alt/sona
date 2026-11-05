@@ -237,8 +237,9 @@ internal static class WindowsSelfTest
                 Check("dictation_other_key_discards_hold", gestures.SequenceEqual([DictationGestureEvent.Begin, DictationGestureEvent.Discard]));
                 hotkey.Configure(new Shortcut(0x79, 3));
                 gestures.Clear();
-                Send([Key(0x11, false), Key(0x12, false), Key(0x79, false)]); await Task.Delay(800);
-                Send([Key(0x79, true), Key(0x12, true), Key(0x11, true)]); await Task.Delay(150);
+                // Left Ctrl and left Alt, the keys a keyboard reports, so the hook's modifier check sees them.
+                Send([Key(0xA2, false), Key(0xA4, false), Key(0x79, false)]); await Task.Delay(800);
+                Send([Key(0x79, true), Key(0xA4, true), Key(0xA2, true)]); await Task.Delay(150);
                 checks["dictation_chord_hold_gestures"] = string.Join(",", gestures);
                 Check("dictation_chord_hold_finishes", gestures.SequenceEqual([DictationGestureEvent.Begin, DictationGestureEvent.Commit]));
             }
