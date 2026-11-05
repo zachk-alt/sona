@@ -687,6 +687,7 @@ var clean = new CaptureRecording(NAudio.Wave.WaveFormat.CreateIeeeFloatWaveForma
 clean.Write(spoken, spoken.Length); clean.Stopped(null);
 var cleanResult = await clean.FinishAsync(TimeSpan.FromSeconds(1));
 Check(cleanResult.End == CaptureEnd.Clean && cleanResult.Error == null && SpeechAudio.Mono16k(cleanResult.Wav).Length == 16000, "a clean stop returns the whole recording");
+Check(DictationDeadlines.StopGrace == TimeSpan.FromMilliseconds(120), "the stop press keeps 120 ms of audio, the Mac's stopGrace");
 Console.WriteLine($"{tests} checks passed.");
 return 0;
 

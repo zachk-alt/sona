@@ -314,6 +314,8 @@ internal sealed class App : Application
         try
         {
             ShowPanel(() => panel?.Processing()); if (tray != null) tray.Text = "Sona: processing";
+            // Listen a moment longer, then close the microphone. The stop cue follows the close, so it is never recorded.
+            await Task.Delay(DictationDeadlines.StopGrace);
             var captured = await recorder.StopAsync();
             // A stop that errored or never confirmed still hands back the audio already recorded.
             if (captured.End != CaptureEnd.Clean) Log(captured.End == CaptureEnd.TimedOut ? "microphone_stop_timeout" : "microphone_stop_failed", captured.Error ?? new IOException());

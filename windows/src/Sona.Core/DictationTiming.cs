@@ -7,6 +7,11 @@ public static class DictationDeadlines
     /// so a slow microphone (a Bluetooth headset switching profile) never leaves a press with no feedback.
     public static readonly TimeSpan FirstAudio = TimeSpan.FromSeconds(1.5);
 
+    /// Audio still captured after the stop press before the microphone closes. The press lands on or just after the
+    /// last word, and WasapiCapture drops the packet it has not read yet when it stops, so a quick tap could clip the
+    /// final consonant. The Mac's stopGrace; its audit found 100 to 150 ms enough.
+    public static readonly TimeSpan StopGrace = TimeSpan.FromMilliseconds(120);
+
     /// Longest Parakeet may take before Whisper transcribes the same recording. The Mac's EnginePolicy.parakeetLimit,
     /// min(10 s, max(3 s, 2 s + seconds / 60)), is sized for Core ML. Windows decodes on the CPU: 0.019 s per recorded
     /// second at 6 threads on an M5 Max (2026-11-05 engine bench), and a low-power laptop may be ten times slower
