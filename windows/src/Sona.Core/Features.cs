@@ -131,7 +131,18 @@ public static class CleanupTimeouts
     /// What the bridge itself uses when ai.timeoutMs is missing (cleanup.mjs), so the cap never undercuts it.
     public const int BridgeDefaultMs = 15000;
 
+    /// 0.3.0 wrote 15000 into ai.json on every Settings save, so that value is the old default, not a choice.
+    public const int OldWindowsDefaultMs = 15000;
+
     public static TimeSpan ProcessCap(int? timeoutMs) => TimeSpan.FromSeconds(Math.Min(35, Math.Max(1, (timeoutMs ?? BridgeDefaultMs) / 1000.0 + 2)));
+
+    /// When Settings saves: a missing ai.timeoutMs, or 0.3.0's default, becomes the Mac's 12 s. Any other value is kept.
+    public static void ApplyDefault(JsonObject ai)
+    {
+        var value = ai["timeoutMs"];
+        bool oldDefault = value is JsonValue number && number.TryGetValue(out int ms) && ms == OldWindowsDefaultMs;
+        if (value is null || oldDefault) ai["timeoutMs"] = DefaultMs;
+    }
 
     /// ai.timeoutMs from an ai.json document; null when the document, the field or its integer is missing.
     public static int? Read(string? json)
@@ -145,6 +156,14 @@ public static class CleanupTimeouts
         }
         catch (JsonException) { return null; }
     }
+}
+
+/// Files Settings writes for the user to edit.
+public static class SettingsTemplates
+{
+    /// What "Open AI configuration" creates when ai.json does not exist yet.
+    public static readonly string AiConfiguration =
+        $"{{\n  \"ai\": {{ \"provider\": \"auto\", \"model\": \"economy\", \"timeoutMs\": {CleanupTimeouts.DefaultMs} }},\n  \"vocabulary\": []\n}}\n";
 }
 
 public enum CleanupMode { Prose, Strict }

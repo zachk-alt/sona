@@ -104,7 +104,7 @@ internal sealed class SettingsWindow : Window
         var advanced = new Button { Content = "Open AI configuration", HorizontalAlignment = HorizontalAlignment.Left };
         advanced.Click += (_, _) =>
         {
-            if (!File.Exists(aiConfigPath)) File.WriteAllText(aiConfigPath, "{\n  \"ai\": { \"provider\": \"auto\", \"model\": \"economy\", \"timeoutMs\": 15000 },\n  \"vocabulary\": []\n}\n");
+            if (!File.Exists(aiConfigPath)) File.WriteAllText(aiConfigPath, SettingsTemplates.AiConfiguration);
             Process.Start(new ProcessStartInfo("notepad.exe") { UseShellExecute = false, ArgumentList = { aiConfigPath } });
         }; stack.Children.Add(advanced);
         Label(stack, "Vocabulary");

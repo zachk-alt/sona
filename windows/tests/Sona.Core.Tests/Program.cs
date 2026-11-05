@@ -849,6 +849,16 @@ Check(CleanupTimeouts.ProcessCap(100000) == TimeSpan.FromSeconds(35) && CleanupT
 Check(CleanupTimeouts.ProcessCap(null) == TimeSpan.FromSeconds(17), "a configuration without timeoutMs never undercuts the bridge's own 15 s default");
 Check(CleanupTimeouts.Read("{\"ai\":{\"provider\":\"claude\",\"timeoutMs\":9000}}") == 9000 && CleanupTimeouts.Read("{\"ai\":{\"provider\":\"none\"}}") == null
     && CleanupTimeouts.Read("{\"ai\":{\"timeoutMs\":\"9000\"}}") == null && CleanupTimeouts.Read("not json") == null && CleanupTimeouts.Read("[]") == null && CleanupTimeouts.Read(null) == null, "timeoutMs is read only from a well-formed ai object");
+{
+    // Saving Settings: a missing wait, or the 15 s that 0.3.0 wrote on every save, becomes the Mac's 12 s; a wait the
+    // user set is kept.
+    System.Text.Json.Nodes.JsonObject Saved(string json) { var ai = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject(); CleanupTimeouts.ApplyDefault(ai); return ai; }
+    Check(Saved("{}")["timeoutMs"]!.GetValue<int>() == 12000 && Saved("{\"timeoutMs\":15000}")["timeoutMs"]!.GetValue<int>() == 12000,
+        "saving Settings gives a missing cleanup wait, or 0.3.0's 15 s, the Mac's 12 s");
+    Check(Saved("{\"timeoutMs\":20000}")["timeoutMs"]!.GetValue<int>() == 20000 && Saved("{\"timeoutMs\":9000}")["timeoutMs"]!.GetValue<int>() == 9000
+        && Saved("{\"timeoutMs\":\"fast\"}")["timeoutMs"]!.GetValue<string>() == "fast", "saving Settings keeps a cleanup wait the user set");
+    Check(SettingsTemplates.AiConfiguration.Contains("\"timeoutMs\": 12000"), "the AI configuration template starts at the Mac's 12 s");
+}
 Console.WriteLine($"{tests} checks passed.");
 return 0;
 

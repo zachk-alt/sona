@@ -240,7 +240,7 @@ internal sealed class App : Application
             ai.Remove("executable"); ai.Remove("args");
         }
         ai["provider"] = provider; ai["model"] = string.IsNullOrEmpty(model) ? "economy" : model;
-        ai["timeoutMs"] ??= CleanupTimeouts.DefaultMs; document["ai"] = ai; document["vocabulary"] = JsonSerializer.SerializeToNode(FeatureConfig.Vocabulary(vocabulary));
+        CleanupTimeouts.ApplyDefault(ai); document["ai"] = ai; document["vocabulary"] = JsonSerializer.SerializeToNode(FeatureConfig.Vocabulary(vocabulary));
         document["snippets"] = JsonSerializer.SerializeToNode(FeatureConfig.Snippets(snippets), SettingsStore.JsonOptions);
         var appDocument = SettingsStore.MergeDocument(ConfigPath, next);
         using var key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run");
