@@ -109,6 +109,8 @@ final class StatusBarController {
     var panelWindowNumber: Int { panel.windowNumber }
     var panelGlassSize: NSSize { currentGlassSize }
     var isActivityHighlighted: Bool { activityHighlighted }
+    /// The menu icon's screen rect, for the presentation self-test.
+    var menuAnchorRect: NSRect? { menuAnchor() }
 
     private static func makePanel(containing view: NSView) -> RecordingPanel {
         let ailBlue = Self.ailBlue
@@ -140,8 +142,9 @@ final class StatusBarController {
         // The brand blue stays exact; the surrounding type follows macOS.
         let credit = RecordingCredit(brandColor: ailBlue)
         let creditWidth = ceil(credit.fittingSize.width)
-        credit.frame = NSRect(x: glassSize.width - 16 - creditWidth, y: 8,
-                              width: creditWidth, height: 16)
+        let creditHeight = max(16, ceil(credit.fittingSize.height))
+        credit.frame = NSRect(x: glassSize.width - 12 - creditWidth, y: 8 - (creditHeight - 16) / 2,
+                              width: creditWidth, height: creditHeight)
         credit.autoresizingMask = [.minXMargin]
 
         content.addSubview(credit)
@@ -400,6 +403,10 @@ final class StatusBarController {
         if currentGlassSize != Self.glassSize { panel.resizeSurface?(Self.glassSize); currentGlassSize = Self.glassSize }
     }
     private func positionSurface() {
+        // Place the panel once, when it appears. The menu icon moves while
+        // recording (macOS adds its microphone indicator), so re-anchoring a
+        // panel already on screen made it jump sideways at processing.
+        guard !panel.isVisible else { return }
         let anchor = menuAnchor()
         let size = panel.frame.size
         let displays = NSScreen.screens.compactMap { screen -> AssistantPanelPlacement.Display? in
@@ -768,6 +775,18 @@ extension NSPanel {
 /// respond immediately to Light, Dark, and accessibility appearances.
 private final class RecordingCredit: NSTextField {
     private let brandColor: NSColor
+    private static let logoHeight: CGFloat = 14
+    private static let logos: [Bool: NSImage] = {
+        var found: [Bool: NSImage] = [:]
+        for (dark, name) in [(true, "AILScriptOnDark"), (false, "AILScriptOnLight")] {
+            if let url = Bundle.main.url(forResource: name, withExtension: "png"),
+               let image = NSImage(contentsOf: url) { found[dark] = image }
+        }
+        return found
+    }()
+    /// The script logo for this appearance; nil outside the app bundle,
+    /// where the plain text credit stands in.
+    private static func logo(dark: Bool) -> NSImage? { logos[dark] }
 
     init(brandColor: NSColor) {
         self.brandColor = brandColor
@@ -781,6 +800,8 @@ private final class RecordingCredit: NSTextField {
         focusRingType = .none
         cell?.usesSingleLineMode = true
         alignment = .right
+        // The logo is an image, so keep the spoken credit the same.
+        setAccessibilityLabel("by Actual Intelligence Labs")
         updateText()
     }
 
@@ -804,10 +825,23 @@ private final class RecordingCredit: NSTextField {
             let line = NSMutableAttributedString(
                 string: "by ", attributes: [.font: font, .paragraphStyle: right,
                                             .shadow: shadow, .foregroundColor: NSColor.labelColor])
-            line.append(NSAttributedString(
-                string: "Actual Intelligence Labs",
-                attributes: [.font: font, .paragraphStyle: right, .shadow: shadow,
-                             .foregroundColor: brandColor]))
+            if let logo = Self.logo(dark: dark) {
+                // The one-line script logo; its baseline sits about a quarter
+                // of the way up so "by" lines up with the bottom of "Actual".
+                let attachment = NSTextAttachment()
+                attachment.image = logo
+                let height = Self.logoHeight
+                attachment.bounds = NSRect(x: 0, y: -height * 0.26,
+                                           width: height * logo.size.width / logo.size.height, height: height)
+                let mark = NSMutableAttributedString(attachment: attachment)
+                mark.addAttributes([.paragraphStyle: right], range: NSRange(location: 0, length: mark.length))
+                line.append(mark)
+            } else {
+                line.append(NSAttributedString(
+                    string: "Actual Intelligence Labs",
+                    attributes: [.font: font, .paragraphStyle: right, .shadow: shadow,
+                                 .foregroundColor: brandColor]))
+            }
             attributedStringValue = line
         }
     }

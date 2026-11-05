@@ -27,9 +27,10 @@ import ApplicationServices
     }
     private func verify() async throws {
         let bar = StatusBarController(); self.bar = bar
-        // NSStatusItem installs its window asynchronously. Sample the normal
-        // anchor only after AppKit has placed the new menu item.
-        try await Task.sleep(for: .milliseconds(200))
+        // NSStatusItem installs its window asynchronously, and macOS can
+        // shift it again about half a second later. Anchor only after it
+        // stops moving, since a panel on screen keeps its first place.
+        try await settle(bar)
         bar.showRecording()
         try await Task.sleep(for: .milliseconds(100))
         bar.showRecording()
@@ -52,7 +53,18 @@ import ApplicationServices
         bar.showRecording()
         try visibleGlass(panel)
         try unchanged(panel)
+        // The menu icon moves while recording (macOS adds its microphone
+        // indicator to the menu bar). Processing must stay exactly where
+        // recording appeared, not chase the icon.
+        let recordingFrame = panel.frame
+        try bar.exerciseHiddenStatusItem {
+            bar.showProcessing()
+            try require(panel.frame == recordingFrame,
+                        "Processing moved the panel: \(recordingFrame) -> \(panel.frame).")
+        }
         bar.showProcessing()
+        try require(panel.frame == recordingFrame,
+                    "Processing moved the panel after the icon returned: \(recordingFrame) -> \(panel.frame).")
         try await Task.sleep(for: .milliseconds(100))
         try require(panel.windowNumber == identity && panel.isVisible && bar.panelGlassSize == compact,
                     "Processing replaced, hid or resized the recording surface.")
@@ -62,12 +74,25 @@ import ApplicationServices
         bar.showIdle()
         try await Task.sleep(for: .milliseconds(450))
         try require(!panel.isVisible && panel.collectionBehavior == ordinarySpaces, "Dismissal failed.")
+        try await settle(bar)
         bar.showRecording()
         try require(panel.windowNumber == identity, "Ordinary dictation changed its surface ID: \(identity) -> \(panel.windowNumber).")
         try require(bar.panelGlassSize == compact, "Ordinary dictation changed its glass size: \(compact) -> \(bar.panelGlassSize).")
         try require(panel.frame == originalFrame, "Ordinary dictation changed its menu anchor: \(originalFrame) -> \(panel.frame).")
         try unchanged(panel)
         bar.suspendSurface()
+    }
+    /// Wait until the menu item has held one place for 700 ms, at most 4 s.
+    private func settle(_ bar: StatusBarController) async throws {
+        var last = bar.menuAnchorRect, steady = 0
+        for _ in 0..<80 {
+            try await Task.sleep(for: .milliseconds(50))
+            let now = bar.menuAnchorRect
+            steady = now == last ? steady + 1 : 0
+            last = now
+            if steady >= 14 { return }
+        }
+        throw Failure("Menu item never settled.")
     }
     private func visibleGlass(_ panel: NSWindow) throws {
         try require(panel.isVisible && panel.isOnActiveSpace,
