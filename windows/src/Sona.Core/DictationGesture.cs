@@ -15,6 +15,11 @@ public sealed class DictationGesture
 
     public bool Latched => latched;
     public bool Held => pressedAt.HasValue;
+    /// The shortcut key is physically down, as far as the hook has seen.
+    public bool KeyDown => keyDown;
+
+    /// Volume, media and launch keys (VK_VOLUME_MUTE to VK_LAUNCH_APP2). Pressing one during a hold keeps the dictation.
+    public static bool IgnoredKey(int virtualKey) => virtualKey is >= 0xAD and <= 0xB7;
 
     /// The shortcut key went down. clean: exactly the shortcut's own modifiers are held. The low-level hook has no
     /// repeat flag, so a down while the key is already down is auto-repeat, and never starts anything, including

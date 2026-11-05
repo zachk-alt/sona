@@ -106,6 +106,8 @@ internal sealed class HotkeyService : IDisposable
         }
     }
     private void Rehooked(ShortcutHook from) { lock (gate) if (from == hook) gesture.Rehooked(); }
+    /// The shortcut key is already down and its press is live, so this key down is auto-repeat that belongs to Sona.
+    private bool LiveRepeat(ShortcutHook from) { lock (gate) return from == hook && gesture.Held && gesture.KeyDown; }
     public static string Label(Shortcut value)
     {
         var parts = new List<string>();
@@ -122,7 +124,8 @@ internal sealed class HotkeyService : IDisposable
     /// loop. Windows calls a low-level hook through the installing thread's message loop and silently removes
     /// it after a timeout, so it must never wait behind the WPF thread (clipboard, audio device and panel
     /// work), and every keystroke on the system would wait with it. The Mac event tap runs on its own thread
-    /// for the same reason (Sources/Murmur/HotKeyMonitor.swift). It never swallows a key.
+    /// for the same reason (Sources/Murmur/HotKeyMonitor.swift). It swallows only a chord key's auto-repeat during a
+    /// live press, as the Mac's event tap does, so letting go of the modifiers first never types into the field.
     private sealed class ShortcutHook : IDisposable
     {
         private const uint WmQuit = 0x0012, WmTimer = 0x0113, WmRearm = 0x8001; // WM_APP + 1.
@@ -224,8 +227,15 @@ internal sealed class HotkeyService : IDisposable
                 bool down = message is Native.WmKeydown or Native.WmSyskeydown;
                 bool up = message is Native.WmKeyup or Native.WmSyskeyup;
                 // Only key downs of other keys count: a chord's modifiers come up in any order at the end of a hold.
-                if (pressed != shortcut.VirtualKey) { if (down) owner.Route(this, Step.OtherKey, 0, false); }
-                else if (down) owner.Route(this, Step.Down, Environment.TickCount64, DictationGesture.Clean(shortcut, Held));
+                // Volume, media and launch keys never count: on the Mac they are not key presses at all.
+                if (pressed != shortcut.VirtualKey) { if (down && !DictationGesture.IgnoredKey(pressed)) owner.Route(this, Step.OtherKey, 0, false); }
+                else if (down)
+                {
+                    // Never the first down (RegisterHotKey needs it) and never a key up (that would leave the key stuck).
+                    bool swallow = !shortcut.IsModifierOnly && owner.LiveRepeat(this);
+                    owner.Route(this, Step.Down, Environment.TickCount64, DictationGesture.Clean(shortcut, Held));
+                    if (swallow) return 1;
+                }
                 else if (up) owner.Route(this, Step.Up, Environment.TickCount64, false);
             }
             return Native.CallNextHookEx(hook, code, wParam, data);
