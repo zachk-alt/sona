@@ -197,7 +197,12 @@ internal static class WindowsSelfTest
             {
                 var triggered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                 int dictationActivations = 0;
-                hotkey.Triggered += () => { dictationActivations++; triggered.TrySetResult(); };
+                var gestures = new List<DictationGestureEvent>();
+                hotkey.Gesture += gesture =>
+                {
+                    gestures.Add(gesture);
+                    if (gesture == DictationGestureEvent.Begin) { dictationActivations++; triggered.TrySetResult(); }
+                };
                 hotkey.Configure(new Shortcut(0x79, 3)); // Ctrl + Alt + F10, CI only.
                 Native.Input Key(ushort key, bool up) => new() { Type = 1, Data = new() { Keyboard = new() { Key = key, Flags = up ? 2u : 0u } } };
                 Native.Input[] keys = [Key(0x11, false), Key(0x12, false), Key(0x79, false), Key(0x79, true), Key(0x12, true), Key(0x11, true)];
@@ -217,6 +222,25 @@ internal static class WindowsSelfTest
                 Check("left_alt_does_not_invoke", dictationActivations == 1);
                 Send([Key(0xA3, false), Key(0xA3, true)]); await Task.Delay(150);
                 Check("dictation_modifier_tap_still_works", dictationActivations == 2);
+                // The Mac's gesture through the real hook (DictationGesture): that tap latched hands-free and the next
+                // tap finishes; a hold of 0.8 s finishes on release; another key during a hold discards; and a chord
+                // held past the threshold finishes on release too, which RegisterHotKey alone cannot see.
+                checks["dictation_gesture_after_tap"] = string.Join(",", gestures);
+                gestures.Clear();
+                Send([Key(0xA3, false)]); await Task.Delay(100); Send([Key(0xA3, true)]); await Task.Delay(150);
+                Check("dictation_second_tap_finishes", gestures.SequenceEqual([DictationGestureEvent.Unlatch]));
+                gestures.Clear();
+                Send([Key(0xA3, false)]); await Task.Delay(800); Send([Key(0xA3, true)]); await Task.Delay(150);
+                Check("dictation_modifier_hold_finishes", gestures.SequenceEqual([DictationGestureEvent.Begin, DictationGestureEvent.Commit]));
+                gestures.Clear();
+                Send([Key(0xA3, false)]); await Task.Delay(100); Send([Key(0x7C, false), Key(0x7C, true)]); await Task.Delay(100); Send([Key(0xA3, true)]); await Task.Delay(150);
+                Check("dictation_other_key_discards_hold", gestures.SequenceEqual([DictationGestureEvent.Begin, DictationGestureEvent.Discard]));
+                hotkey.Configure(new Shortcut(0x79, 3));
+                gestures.Clear();
+                Send([Key(0x11, false), Key(0x12, false), Key(0x79, false)]); await Task.Delay(800);
+                Send([Key(0x79, true), Key(0x12, true), Key(0x11, true)]); await Task.Delay(150);
+                checks["dictation_chord_hold_gestures"] = string.Join(",", gestures);
+                Check("dictation_chord_hold_finishes", gestures.SequenceEqual([DictationGestureEvent.Begin, DictationGestureEvent.Commit]));
             }
             oldClipboard = Clipboard.GetDataObject();
             Clipboard.SetText("Sona CI clipboard sentinel"); touchedClipboard = true;
