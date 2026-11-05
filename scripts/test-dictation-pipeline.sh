@@ -11,6 +11,6 @@ clang -fobjc-arc -fmodules -c Sources/SonaObjC/SonaObjC.m -I Sources/SonaObjC/in
 swiftc -swift-version 5 -D SONA_TEST_LOG -module-cache-path "$out/module-cache" \
   -I Sources/SonaObjC/include "$out/SonaObjC.o" \
   Sources/Murmur/FrameworkException.swift Sources/Murmur/Log.swift Sources/Murmur/Transcriber.swift \
-  Sources/Murmur/AudioCapture.swift Sources/Murmur/DictationMetrics.swift Sources/Murmur/Config.swift \
+  Sources/Murmur/AudioCapture.swift Sources/Murmur/PCMSamples.swift Sources/Murmur/DictationMetrics.swift Sources/Murmur/Config.swift \
   Sources/Murmur/HotKeyBinding.swift Sources/Murmur/DebugTextLog.swift Tests/DictationPipelineTests.swift -o "$out/tests"
 "$out/tests"
