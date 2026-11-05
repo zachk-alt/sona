@@ -21,6 +21,11 @@ public static class DictationDeadlines
     public static TimeSpan ParakeetLimit(double audioSeconds) =>
         TimeSpan.FromSeconds(Math.Clamp(ParakeetBaseSeconds + Math.Max(0, audioSeconds) * ParakeetSecondsPerRecordedSecond, ParakeetBaseSeconds, ParakeetCapSeconds));
     public const double ParakeetBaseSeconds = 6, ParakeetSecondsPerRecordedSecond = 0.3, ParakeetCapSeconds = 45;
+
+    /// Longest a Parakeet load inside a dictation may take before Whisper runs instead. Loads normally happen at
+    /// launch; this one follows a dropped recognizer. Reading 661 MB from a slow disk at 50 MB/s takes about 13 s
+    /// before ONNX Runtime builds its sessions, so 30 s leaves room without letting a hung load eat the session.
+    public static readonly TimeSpan ParakeetLoad = TimeSpan.FromSeconds(30);
 }
 
 /// What the panel says when a dictation's work was cancelled. The session budget running out shows the Mac's stall
@@ -61,16 +66,23 @@ public sealed class EngineGate
 
     /// Busy when the gate is held; TimedOut after the limit, with the work left running. Work that finishes after the
     /// caller stopped waiting (the limit or a cancellation) hands its value to late. A failure in time is rethrown.
-    public async Task<EngineRun<T>> RunBoundedAsync<T>(Func<T> work, TimeSpan limit, CancellationToken cancellation, Action<T>? late = null)
+    public Task<EngineRun<T>> RunBoundedAsync<T>(Func<T> work, TimeSpan limit, CancellationToken cancellation, Action<T>? late = null) =>
+        RunBoundedAsync(decoding => { decoding(); return work(); }, limit, limit, cancellation, late);
+
+    /// The same, for work that sets up first (a model load). Setup gets its own allowance, and the decode limit starts
+    /// when the work calls decoding, so a slow load never eats the decode's time.
+    public async Task<EngineRun<T>> RunBoundedAsync<T>(Func<Action, T> work, TimeSpan setupLimit, TimeSpan limit, CancellationToken cancellation, Action<T>? late = null)
     {
         cancellation.ThrowIfCancellationRequested();
         if (!gate.Wait(0)) return new(EngineOutcome.Busy, default);
+        var decoding = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         Task<T> decode;
-        try { decode = Task.Run(() => { try { return work(); } finally { gate.Release(); } }, CancellationToken.None); }
+        try { decode = Task.Run(() => { try { return work(() => decoding.TrySetResult()); } finally { gate.Release(); } }, CancellationToken.None); }
         catch { gate.Release(); throw; }
         using var timer = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-        var deadline = Task.Delay(limit, timer.Token);
-        if (await Task.WhenAny(decode, deadline).ConfigureAwait(false) == decode)
+        var first = await Task.WhenAny(decode, decoding.Task, Task.Delay(setupLimit, timer.Token)).ConfigureAwait(false);
+        if (first == decoding.Task) first = await Task.WhenAny(decode, Task.Delay(limit, timer.Token)).ConfigureAwait(false);
+        if (first == decode)
         {
             timer.Cancel();
             return new(EngineOutcome.Completed, await decode.ConfigureAwait(false));

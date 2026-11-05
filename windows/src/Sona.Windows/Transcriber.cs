@@ -66,9 +66,10 @@ internal sealed class Transcriber : IDisposable
     private async Task<string?> TranscribeParakeetAsync(float[] samples, string folder, CancellationToken cancellation, Action<string>? late)
     {
         int abandoned = 0;
-        var run = await parakeetGate.RunBoundedAsync(() =>
+        var run = await parakeetGate.RunBoundedAsync(decoding =>
         {
             var engine = Load(folder);
+            decoding();
             try { return engine.Transcribe(samples); }
             catch (Exception)
             {
@@ -79,7 +80,7 @@ internal sealed class Transcriber : IDisposable
                 parakeet = null;
                 throw;
             }
-        }, DictationDeadlines.ParakeetLimit(samples.Length / (double)SpeechAudio.SampleRate), cancellation, text =>
+        }, DictationDeadlines.ParakeetLoad, DictationDeadlines.ParakeetLimit(samples.Length / (double)SpeechAudio.SampleRate), cancellation, text =>
         {
             // Late: never a success that would clear the time-out, so a machine too slow for Parakeet stops using it.
             if (!string.IsNullOrWhiteSpace(text)) late?.Invoke(text);

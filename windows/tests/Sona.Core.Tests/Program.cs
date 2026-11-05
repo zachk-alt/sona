@@ -720,6 +720,11 @@ Check(DictationOutcome.Cancelled(byUser: true, quitting: false) == null && Dicta
 Check(WhisperText.Join([" [BLANK_AUDIO]"]) == "" && WhisperText.Join([" (music)", " [Music] (applause)"]) == "", "annotation-only segments type nothing");
 Check(WhisperText.Join([" And so my fellow Americans,", " [BLANK_AUDIO]", " ask not."]) == "And so my fellow Americans, ask not.", "annotations between spoken segments are dropped");
 Check(WhisperText.Join([" Call f(x) at [noon] today."]) == "Call f(x) at [noon] today." && WhisperText.Join([" (laughs) that was fun"]) == "(laughs) that was fun", "brackets inside spoken text are kept");
+var slowLoad = await engineGate.RunBoundedAsync(decoding => { Thread.Sleep(300); decoding(); Thread.Sleep(50); return "loaded"; }, TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(200), CancellationToken.None);
+Check(slowLoad.Outcome == EngineOutcome.Completed && slowLoad.Value == "loaded", "a slow model load does not use up the decode's limit");
+var hungLoad = await engineGate.RunBoundedAsync(decoding => { Thread.Sleep(400); decoding(); return "never"; }, TimeSpan.FromMilliseconds(100), TimeSpan.FromSeconds(5), CancellationToken.None);
+Check(hungLoad.Outcome == EngineOutcome.TimedOut, "a load past its own allowance times out too");
+for (int i = 0; i < 100 && engineGate.Busy; i++) await Task.Delay(10);
 Console.WriteLine($"{tests} checks passed.");
 return 0;
 
