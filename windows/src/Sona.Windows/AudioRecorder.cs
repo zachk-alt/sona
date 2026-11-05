@@ -36,8 +36,12 @@ internal sealed class AudioRecorder : IDisposable
         using var enumerator = new MMDeviceEnumerator();
         device = string.IsNullOrEmpty(deviceId) ? enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Communications) : enumerator.GetDevice(deviceId);
         capture = new WasapiCapture(device);
-        lock (gate) { Generation++; live = new LiveAudio(capture.WaveFormat.SampleRate, capture.WaveFormat.Channels); }
-        lock (gate) recording = new CaptureRecording(capture.WaveFormat);
+        lock (gate)
+        {
+            Generation++;
+            live = new LiveAudio(capture.WaveFormat.SampleRate, capture.WaveFormat.Channels);
+            recording = new CaptureRecording(capture.WaveFormat);
+        }
         capture.DataAvailable += OnData;
         capture.RecordingStopped += OnStopped;
         capture.StartRecording();
