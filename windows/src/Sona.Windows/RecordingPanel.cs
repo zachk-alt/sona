@@ -124,32 +124,53 @@ internal sealed class RecordingPanel : Window
         new WindowInteropHelper(this).EnsureHandle();
         var look = PanelLook.Current();
         surface.Configure(Scale, look);
-        Place();
+        // Placed once per appearance, like the Mac (StatusBarController.positionSurface): processing, an error and a
+        // cancelled fade keep the first spot, even if the target window has moved to another monitor since.
+        bool fresh = !IsVisible;
+        if (fresh) Place();
         if (!IsVisible) Show();
         Native.ShowWindow(handle, 4); // SW_SHOWNOACTIVATE: raise without activating.
-        Place(); // Settles a move onto a monitor with another scale.
+        if (fresh) Place(); // Settles a move onto a monitor with another scale.
+        else if (placed) MoveTo(handle, originX, originY, raise: true); // Raised again, in the same spot.
         surface.Configure(Scale, look);
     }
+
+    /// The panel's top left corner on screen, in device pixels.
+    internal (int X, int Y) ScreenOrigin => handle != 0 && GetWindowRect(handle, out var bounds) ? (bounds.Left, bounds.Top) : (originX, originY);
+
+    /// Test seam for the placement check: the monitor and work area (device pixels) and scale to place on,
+    /// in place of the target window's monitor.
+    internal Func<(Native.Rect Monitor, Native.Rect Work, double Scale)>? ScreenForTests { get; set; }
 
     // The Mac fallback placement (AssistantPanelPlacement.origin without a menu anchor), in device
     // pixels on the monitor of the foreground window: glass center 180 DIP from the monitor's right
     // edge, glass top 6 DIP below the top of the work area, kept 8 DIP inside the work area.
     private void Place()
     {
-        nint window = lastForeground != 0 && Native.IsWindow(lastForeground) ? lastForeground : Native.GetForegroundWindow();
-        nint monitor = MonitorFromWindow(window, 2);
-        var info = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
-        if (monitor == 0 || !GetMonitorInfo(monitor, ref info)) return;
-        double k = GetDpiForMonitor(monitor, 0, out uint dpi, out _) == 0 && dpi > 0 ? dpi / 96.0 : Scale;
+        if (ScreenForTests?.Invoke() is not { } screen && !TargetScreen(out screen)) return;
+        var (monitorRect, work, k) = screen;
         double glassWidth = PanelGeometry.GlassWidth * k, glassHeight = PanelGeometry.GlassHeight * k, margin = PanelGeometry.Margin * k;
-        double minX = info.Work.Left + 8 * k, maxX = info.Work.Right - 8 * k - glassWidth;
-        double minTop = info.Work.Top + 6 * k, maxTop = info.Work.Bottom - 8 * k - glassHeight;
-        double glassX = Math.Min(maxX, Math.Max(minX, info.Monitor.Right - 180 * k - glassWidth / 2));
-        double glassTop = Math.Max(info.Work.Top, Math.Min(minTop, maxTop));
+        double minX = work.Left + 8 * k, maxX = work.Right - 8 * k - glassWidth;
+        double minTop = work.Top + 6 * k, maxTop = work.Bottom - 8 * k - glassHeight;
+        double glassX = Math.Min(maxX, Math.Max(minX, monitorRect.Right - 180 * k - glassWidth / 2));
+        double glassTop = Math.Max(work.Top, Math.Min(minTop, maxTop));
         originX = (int)Math.Round(glassX - margin); originY = (int)Math.Round(glassTop - margin); placed = true;
         uint before = GetDpiForWindow(handle);
         MoveTo(handle, originX, originY, raise: true);
         if (GetDpiForWindow(handle) != before) MoveTo(handle, originX, originY, raise: true);
+    }
+
+    // The monitor of the window being dictated into, or of the foreground window when that one has closed.
+    private bool TargetScreen(out (Native.Rect Monitor, Native.Rect Work, double Scale) screen)
+    {
+        screen = default;
+        nint window = lastForeground != 0 && Native.IsWindow(lastForeground) ? lastForeground : Native.GetForegroundWindow();
+        nint monitor = MonitorFromWindow(window, 2);
+        var info = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
+        if (monitor == 0 || !GetMonitorInfo(monitor, ref info)) return false;
+        double k = GetDpiForMonitor(monitor, 0, out uint dpi, out _) == 0 && dpi > 0 ? dpi / 96.0 : Scale;
+        screen = (info.Monitor, info.Work, k);
+        return true;
     }
 
     // SWP_NOSIZE | SWP_NOACTIVATE, plus HWND_TOPMOST when raising or SWP_NOZORDER for a plain move.
@@ -220,6 +241,7 @@ internal sealed class RecordingPanel : Window
     [DllImport("user32.dll")] private static extern nint MonitorFromWindow(nint window, uint flags);
     [DllImport("user32.dll")] private static extern bool GetMonitorInfo(nint monitor, ref MonitorInfo info);
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(nint window);
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(nint window, out Native.Rect bounds);
     [DllImport("shcore.dll")] private static extern int GetDpiForMonitor(nint monitor, int type, out uint dpiX, out uint dpiY);
     [DllImport("user32.dll")] private static extern bool SetWindowPos(nint window, nint after, int x, int y, int width, int height, uint flags);
 }

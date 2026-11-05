@@ -45,6 +45,29 @@ internal static class WindowsSelfTest
                 Check("panel_credit_is_help_text_not_name", System.Windows.Automation.AutomationProperties.GetName(creditSurface) == ""
                     && System.Windows.Automation.Peers.UIElementAutomationPeer.CreatePeerForElement(creditSurface)?.GetHelpText() == "by Actual Intelligence Labs");
                 credited.Close();
+
+                // Placed once per appearance, like the Mac: processing and an error keep the spot even when the
+                // target's monitor changes. A fresh appearance takes the new monitor, which proves the seam is live.
+                var steady = new RecordingPanel();
+                (Native.Rect, Native.Rect, double) Screen(int left) =>
+                    (new Native.Rect { Left = left, Top = 0, Right = left + 1600, Bottom = 900 }, new Native.Rect { Left = left, Top = 0, Right = left + 1600, Bottom = 860 }, 1.0);
+                steady.ScreenForTests = () => Screen(0);
+                steady.Recording(0);
+                var recordingSpot = steady.ScreenOrigin;
+                steady.ScreenForTests = () => Screen(2000);
+                steady.Processing();
+                bool processingKept = steady.ScreenOrigin == recordingSpot;
+                steady.ShowError("Sona CI placement check");
+                bool errorKept = steady.ScreenOrigin == recordingSpot;
+                steady.HideNow();
+                steady.Recording(0);
+                var freshSpot = steady.ScreenOrigin;
+                steady.HideNow(); steady.Close();
+                checks["panel_spots"] = $"recording {recordingSpot}, fresh show on the other monitor {freshSpot}";
+                bool freshMoved = freshSpot.X == recordingSpot.X + 2000 && freshSpot.Y == recordingSpot.Y;
+                Check("panel_keeps_spot_processing", processingKept);
+                Check("panel_keeps_spot_error", errorKept);
+                Check("panel_fresh_show_places_again", freshMoved);
             }
             // ---- End of UI parity checks. ----
             string bridge = Path.Combine(AppContext.BaseDirectory, "bridge", "sona-cleanup.mjs");
