@@ -13,7 +13,8 @@ public sealed record Shortcut(int VirtualKey = 0x20, uint Modifiers = 0x0002 | 0
 
 public sealed record AppSettings
 {
-    public int Version { get; init; } = 1;
+    // 2 since 0.4.0: a version 1 file's maximumRecordingSeconds of 120 was the old default, not a choice.
+    public int Version { get; init; } = 2;
     public bool SetupComplete { get; init; }
     public Shortcut Shortcut { get; init; } = new();
     public bool CleanupEnabled { get; init; } = true;
@@ -51,13 +52,15 @@ public static class SettingsStore
             }
             // Legacy commandShortcut and assistant fields are unowned data. Never parse or activate them.
             var defaults = new AppSettings();
+            int version = Read("version", 1), seconds = Read("maximumRecordingSeconds", defaults.MaximumRecordingSeconds);
+            if (version < 2 && seconds == 120) seconds = defaults.MaximumRecordingSeconds;
             return (defaults with
             {
-                Version = Read("version", defaults.Version), SetupComplete = Read("setupComplete", false),
+                Version = Math.Max(version, defaults.Version), SetupComplete = Read("setupComplete", false),
                 Shortcut = Read("shortcut", defaults.Shortcut),
                 AutoAddToDictionary = Read("autoAddToDictionary", false), CleanupEnabled = Read("cleanupEnabled", true),
                 Language = Read("language", AppSettings.DefaultLanguage), MicrophoneId = Read<string?>("microphoneId", null), NodePath = Read<string?>("nodePath", null),
-                StartAtLogin = Read("startAtLogin", false), MaximumRecordingSeconds = Read("maximumRecordingSeconds", 300)
+                StartAtLogin = Read("startAtLogin", false), MaximumRecordingSeconds = seconds
             }).Validate();
         }
         catch (Exception e) when (e is IOException or JsonException or UnauthorizedAccessException or InvalidOperationException) { return new(); }

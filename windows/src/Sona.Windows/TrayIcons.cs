@@ -89,7 +89,8 @@ internal static class TrayMenu
         typeof(Forms.NotifyIcon).GetMethod("ShowContextMenu", BindingFlags.Instance | BindingFlags.NonPublic, Type.EmptyTypes);
 
     /// A left click opens the same menu as a right click, as a click on the Mac menu bar icon does.
-    /// MouseClick skips the clicks of a double click, so a double click still opens Settings.
+    /// The first click of a double click also raises MouseClick, so the double click handler closes this menu
+    /// before it opens Settings.
     internal static void OpenOnLeftClick(Forms.NotifyIcon tray) => tray.MouseClick += (_, e) =>
     {
         if (e.Button != Forms.MouseButtons.Left || tray.ContextMenuStrip is not { } menu) return;

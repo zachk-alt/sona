@@ -127,7 +127,7 @@ internal sealed class App : Application
             Quit: () => Dispatcher.InvokeAsync(QuitAsync)));
         var menuTheme = TrayMenu.FollowTheme(menu);
         Exit += (_, _) => menuTheme.Dispose();
-        tray.ContextMenuStrip = menu; tray.DoubleClick += (_, _) => Dispatcher.Invoke(OpenSettings);
+        tray.ContextMenuStrip = menu; tray.DoubleClick += (_, _) => { menu.Close(); Dispatcher.Invoke(OpenSettings); };
         TrayMenu.OpenOnLeftClick(tray);
         tray.BalloonTipClicked += (_, _) => Dispatcher.Invoke(() => { if (correction != null) ReviewCorrection(); else ReviewLatest(); });
         // Anything that still escapes is logged (type and stack only) instead of silently ending Sona.
@@ -396,8 +396,9 @@ internal sealed class App : Application
                 _ = ObserveCorrectionsAsync(learningSession, target!, learningCancellation.Token);
             }
         }
-        // The 120 s budget ran out: the panel says so, like the Mac. A cancel the user chose shows nothing.
-        catch (OperationCanceledException) { sessionFailure = DictationOutcome.Cancelled(cancelledSession == id, quitting); }
+        // The 120 s budget ran out: the panel says so, like the Mac, and says the text is ready when the transcript
+        // already reached Copy last dictation. A cancel the user chose shows nothing.
+        catch (OperationCanceledException) { sessionFailure = DictationOutcome.Cancelled(cancelledSession == id, quitting, deliveredSession == id); }
         catch (Exception e)
         {
             // Whisper.net caches a failed native load for the life of the process, so a repair needs a restart

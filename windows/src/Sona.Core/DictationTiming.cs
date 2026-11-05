@@ -41,7 +41,8 @@ public static class DictationDeadlines
 public static class DictationOutcome
 {
     public const string Stalled = "Transcription stalled. Try again.";
-    public static string? Cancelled(bool byUser, bool quitting) => byUser || quitting ? null : Stalled;
+    public const string TextReady = "Text is ready in Copy last dictation.";
+    public static string? Cancelled(bool byUser, bool quitting, bool textKept = false) => byUser || quitting ? null : textKept ? TextReady : Stalled;
 }
 
 public enum EngineOutcome { Completed, Busy, TimedOut }
