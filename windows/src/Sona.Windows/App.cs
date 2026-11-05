@@ -94,19 +94,23 @@ internal sealed class App : Application
         using var icon = new System.Drawing.Icon(resource);
         idleIcon = (System.Drawing.Icon)icon.Clone(); activeIcon = TrayIcons.Active();
         tray = new Forms.NotifyIcon { Icon = idleIcon, Text = "Sona", Visible = true };
-        var menu = new Forms.ContextMenuStrip();
-        menu.Items.Add("Settings…", null, (_, _) => Dispatcher.Invoke(OpenSettings));
-        menu.Items.Add("Copy last dictation", null, (_, _) => Dispatcher.Invoke(() =>
-        {
-            if (latest.Length == 0) { Notify("There is no dictation to copy yet."); return; }
-            try { Clipboard.SetText(latest); Notify("Last dictation copied."); } catch { Notify("The clipboard is busy. Try again."); }
-        }));
-        menu.Items.Add("Review dictionary suggestion…", null, (_, _) => Dispatcher.Invoke(ReviewCorrection));
-        menu.Items.Add("Review last dictation…", null, (_, _) => Dispatcher.Invoke(ReviewLatest));
-        menu.Items.Add("Cancel recording or processing", null, (_, _) => Dispatcher.InvokeAsync(CancelAsync));
-        menu.Items.Add(new Forms.ToolStripSeparator());
-        menu.Items.Add("Quit Sona", null, (_, _) => Dispatcher.InvokeAsync(QuitAsync));
+        var menu = TrayMenu.Build(new TrayMenuActions(
+            Settings: () => Dispatcher.Invoke(OpenSettings),
+            CopyLast: () => Dispatcher.Invoke(() =>
+            {
+                if (latest.Length == 0) { Notify("There is no dictation to copy yet."); return; }
+                try { Clipboard.SetText(latest); Notify("Last dictation copied."); } catch { Notify("The clipboard is busy. Try again."); }
+            }),
+            ReviewSpelling: () => Dispatcher.Invoke(ReviewCorrection),
+            ReviewLast: () => Dispatcher.Invoke(ReviewLatest),
+            Cancel: () => Dispatcher.InvokeAsync(CancelAsync),
+            // About takes focus, so like Settings it waits for the dictation to end.
+            About: () => Dispatcher.Invoke(() => { if (busy) Notify("Finish or cancel this dictation before opening About."); else AboutWindow.Open(); }),
+            Quit: () => Dispatcher.InvokeAsync(QuitAsync)));
+        var menuTheme = TrayMenu.FollowTheme(menu);
+        Exit += (_, _) => menuTheme.Dispose();
         tray.ContextMenuStrip = menu; tray.DoubleClick += (_, _) => Dispatcher.Invoke(OpenSettings);
+        TrayMenu.OpenOnLeftClick(tray);
         tray.BalloonTipClicked += (_, _) => Dispatcher.Invoke(() => { if (correction != null) ReviewCorrection(); else ReviewLatest(); });
         // Anything that still escapes is logged (type and stack only) instead of silently ending Sona.
         DispatcherUnhandledException += OnDispatcherUnhandledException;

@@ -68,6 +68,32 @@ internal static class WindowsSelfTest
                 Check("panel_keeps_spot_processing", processingKept);
                 Check("panel_keeps_spot_error", errorKept);
                 Check("panel_fresh_show_places_again", freshMoved);
+
+                // The tray menu users see: About Sona, the taskbar theme, and a left click that opens the same menu.
+                Action none = () => { };
+                using (var menu = TrayMenu.Build(new TrayMenuActions(none, none, none, none, none, none, none)))
+                {
+                    var labels = menu.Items.OfType<System.Windows.Forms.ToolStripMenuItem>().Select(item => item.Text ?? "").ToArray();
+                    checks["tray_menu_items"] = labels;
+                    Check("tray_menu_about", labels.Contains(TrayMenu.AboutTitle) && Array.IndexOf(labels, TrayMenu.AboutTitle) == labels.Length - 2);
+                    TrayMenu.ApplyTheme(menu, light: false);
+                    var darkFill = (menu.Renderer as System.Windows.Forms.ToolStripProfessionalRenderer)?.ColorTable.ToolStripDropDownBackground ?? System.Drawing.Color.White;
+                    Check("tray_menu_dark_theme", SystemParameters.HighContrast
+                        || (0.2126 * darkFill.R + 0.7152 * darkFill.G + 0.0722 * darkFill.B) / 255 < 0.2 && menu.ForeColor.ToArgb() == System.Drawing.Color.White.ToArgb());
+                    TrayMenu.ApplyTheme(menu, light: true);
+                    Check("tray_menu_light_theme", menu.RenderMode == System.Windows.Forms.ToolStripRenderMode.ManagerRenderMode);
+                }
+                Check("tray_left_click_menu_api", TrayMenu.ShowContextMenu != null);
+
+                // About shows the release version and the credits, and the notices it opens ship beside Sona.exe.
+                var release = typeof(App).Assembly.GetName().Version!;
+                var about = new AboutWindow();
+                checks["about_version"] = AboutWindow.VersionLine;
+                Check("about_version_matches_release", AboutWindow.Version == $"{release.Major}.{release.Minor}.{release.Build}" && AboutWindow.VersionLine == "Version " + AboutWindow.Version);
+                Check("about_credits", AboutWindow.Credits.Contains("Parakeet TDT 0.6B v2") && AboutWindow.Credits.Contains("CC BY 4.0")
+                    && AboutWindow.Credits.Contains("sherpa-onnx") && AboutWindow.Credits.Contains("NAudio") && AboutWindow.Credits.Contains("Whisper.net"));
+                Check("about_notices_packaged", File.Exists(AboutWindow.NoticesPath));
+                about.Close();
             }
             // ---- End of UI parity checks. ----
             string bridge = Path.Combine(AppContext.BaseDirectory, "bridge", "sona-cleanup.mjs");
