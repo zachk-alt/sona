@@ -75,27 +75,6 @@ public static class SettingsStore
 
 }
 
-// Only a boolean chord marker is retained, never the identity of another key.
-public sealed class ModifierTap
-{
-    private long? pressedAt;
-    private bool chordUsed;
-    public void Down(long milliseconds, bool otherModifierHeld)
-    {
-        if (pressedAt.HasValue) return;
-        pressedAt = milliseconds;
-        chordUsed = otherModifierHeld;
-    }
-    public void OtherKeyDown() { if (pressedAt.HasValue) chordUsed = true; }
-    public bool Up(long milliseconds)
-    {
-        bool tap = pressedAt is long start && !chordUsed && milliseconds - start is >= 0 and <= 650;
-        Reset();
-        return tap;
-    }
-    public void Reset() { pressedAt = null; chordUsed = false; }
-}
-
 public static class ShortcutPolicy
 {
     public static bool RightAltCommandAllowed(uint keyboardLayout) => keyboardLayout == 0x04090409;

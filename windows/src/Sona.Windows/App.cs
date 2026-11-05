@@ -46,6 +46,8 @@ internal sealed class App : Application
     private CancellationTokenSource? learningCancellation;
     private WordCorrection? correction;
     private bool ready, busy, recording, quitting;
+    // starting: the press's text field check is still running. finishWhenStarted: the key came up during it.
+    private bool starting, finishWhenStarted;
     private string latest = "";
     // Numbers each dictation, and names the one whose text is in latest, so a late result never replaces newer text.
     private int session, deliveredSession, cancelledSession;
@@ -121,7 +123,7 @@ internal sealed class App : Application
         AppDomain.CurrentDomain.UnhandledException += (_, e) => { if (e.ExceptionObject is Exception error) Log("fatal", error); };
         TaskScheduler.UnobservedTaskException += (_, e) => { Log("task", e.Exception); e.SetObserved(); };
         hotkey = new HotkeyService();
-        hotkey.Triggered += async () => { try { await ToggleAsync(); } catch (Exception e) { Recover("shortcut", e); } };
+        hotkey.Gesture += async gesture => { try { await OnGestureAsync(gesture); } catch (Exception e) { Recover("shortcut", e); } };
         // The shortcut's keyboard hook is re-armed after an unlock or a resume, when Windows is most likely to have dropped it.
         SystemEvents.SessionSwitch += OnSessionSwitch;
         SystemEvents.PowerModeChanged += OnPowerModeChanged;
@@ -279,26 +281,49 @@ internal sealed class App : Application
             if (!quitting) Notify("The Parakeet download did not finish. English dictation keeps using Whisper. Save Settings to try again.");
         }
     }
-    private async Task ToggleAsync()
+    // The Mac's gesture (AppState.handle): the press starts recording, a release after the hold threshold or the tap
+    // that stops a latched dictation finishes it, and another key struck during the starting hold throws it away.
+    private async Task OnGestureAsync(DictationGestureEvent gesture)
     {
-        if (recording) { await FinishAsync(); return; }
-        if (busy) return;
-        if (!ready) { OpenSettings(); return; }
+        switch (gesture)
+        {
+            case DictationGestureEvent.Begin:
+                if (!await StartAsync()) hotkey?.ResetGesture();
+                break;
+            // A tap whose dictation never started latches nothing, so the next tap starts one.
+            case DictationGestureEvent.Latch:
+                if (!starting && !recording) hotkey?.ResetGesture();
+                break;
+            case DictationGestureEvent.Commit or DictationGestureEvent.Unlatch:
+                if (starting) finishWhenStarted = true; else await FinishAsync();
+                break;
+            case DictationGestureEvent.Discard:
+                if (starting || recording) await CancelAsync();
+                break;
+        }
+    }
+    /// False when this press does not own a dictation (busy, not set up, no text field or no microphone),
+    /// so its release does nothing.
+    private async Task<bool> StartAsync()
+    {
+        if (recording || starting) return true;
+        if (busy) return false;
+        if (!ready) { OpenSettings(); return false; }
         StopLearning(); correction = null; sessionFailure = null;
-        busy = true; session++;
+        busy = true; starting = true; finishWhenStarted = false; session++;
         try
         {
             operation = new CancellationTokenSource();
             var capture = await TextInsertion.CaptureWithStatusAsync();
             target = capture.Target;
-            if (operation.IsCancellationRequested) { Reset(); return; }
+            if (operation.IsCancellationRequested) { Reset(); return false; }
             if (target == null)
             {
                 Reset();
                 Notify(TextInsertion.NotAnswering(capture.Status)
                     ? "That app is not answering Sona yet. Try again in a moment."
-                    : "Place the cursor in an editable, non-password text field, then tap your shortcut.");
-                return;
+                    : "Place the cursor in an editable, non-password text field, then press your shortcut.");
+                return false;
             }
             sessionMode = CleanupModes.ForProcess(ProcessName(target.Process));
             recordingStart = new RecordingStart(); recordingWindow = target.Window;
@@ -307,7 +332,11 @@ internal sealed class App : Application
             limit.Interval = TimeSpan.FromSeconds(settings.MaximumRecordingSeconds); limit.Start();
         }
         // Shown in the panel, like the Mac.
-        catch { sessionFailure = "The microphone is unavailable or switching. Try again."; Reset(); }
+        catch { sessionFailure = "The microphone is unavailable or switching. Try again."; Reset(); return false; }
+        finally { starting = false; }
+        // A hold released while the field was checked finishes now; what little was heard still goes through.
+        if (finishWhenStarted) { finishWhenStarted = false; await FinishAsync(); }
+        return true;
     }
     private async Task FinishAsync()
     {
@@ -397,7 +426,7 @@ internal sealed class App : Application
     private void Reset()
     {
         // Flags first, and every step guarded, so no fault below can leave a session half open.
-        recording = false; busy = false;
+        recording = false; busy = false; starting = false; finishWhenStarted = false;
         string? failure = sessionFailure; sessionFailure = null;
         var session = selectionSession; selectionSession = null; target = null;
         Guard(() => session?.Dispose());
@@ -413,6 +442,7 @@ internal sealed class App : Application
         var done = operation; operation = null;
         Guard(() => done?.Dispose());
         Guard(() => { if (tray != null) { tray.Text = "Sona"; tray.Icon = idleIcon; } });
+        Guard(() => hotkey?.ResetGesture());
         Guard(() => hotkey?.Rearm());
     }
     private void ShowRecording(RecordingCue cue)

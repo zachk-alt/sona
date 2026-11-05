@@ -8,17 +8,23 @@ using Sona.Core;
 namespace Sona.Windows;
 
 // Owns exactly one dictation shortcut. Retired command bindings are never registered.
+// The Mac's gesture for both kinds of shortcut (DictationGesture): the low-level hook sees each press and release.
+// A chord is also registered with RegisterHotKey, which reserves it and keeps its key from the focused app, as before.
 internal sealed class HotkeyService : IDisposable
 {
     private const int Id = 0x534F;
     private readonly HwndSource source = new(new HwndSourceParameters("Sona shortcut receiver") { Width = 0, Height = 0, ParentWindow = new nint(-3) });
     private readonly Dispatcher dispatcher = Dispatcher.CurrentDispatcher;
-    private bool enabled;
-    private int generation;
+    private volatile bool enabled;
     private readonly bool allowSyntheticForTests;
     private Shortcut shortcut = new();
-    private volatile ModifierHook? modifierHook;
-    public event Action? Triggered;
+    private volatile ShortcutHook? hook;
+    // Shared by the hook thread and WM_HOTKEY on this one, always under gate. A reset bumps epoch, so events queued
+    // before it are dropped (the Mac's HotKeyMonitor generation).
+    private readonly object gate = new();
+    private DictationGesture gesture = new();
+    private int epoch;
+    public event Action<DictationGestureEvent>? Gesture;
 
     public HotkeyService(bool allowSyntheticForTests = false)
     {
@@ -33,14 +39,12 @@ internal sealed class HotkeyService : IDisposable
         {
             if (!value.IsValid) throw new ArgumentException("Choose a supported shortcut.");
             shortcut = value;
-            if (value.IsModifierOnly)
-            {
-                int expectedGeneration = generation;
-                modifierHook = ModifierHook.Start(value.VirtualKey, allowSyntheticForTests,
-                    () => dispatcher.BeginInvoke(() => { if (enabled && expectedGeneration == generation) Fire(); }));
-            }
-            else if (!Native.RegisterHotKey(source.Handle, Id, value.Modifiers | 0x4000, (uint)value.VirtualKey))
+            lock (gate) { gesture = new(); epoch++; }
+            if (!value.IsModifierOnly && !Native.RegisterHotKey(source.Handle, Id, value.Modifiers | 0x4000, (uint)value.VirtualKey))
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "This shortcut is already used or reserved by Windows. Choose another.");
+            try { hook = ShortcutHook.Start(value, allowSyntheticForTests, this); }
+            // Without the hook a chord still starts and stops dictation as a tap, through WM_HOTKEY.
+            catch (Win32Exception) when (!value.IsModifierOnly) { }
             enabled = true;
         }
         catch
@@ -52,21 +56,55 @@ internal sealed class HotkeyService : IDisposable
     }
     public void Disable()
     {
-        enabled = false; generation++;
+        enabled = false;
+        lock (gate) { gesture.Reset(); epoch++; }
         Native.UnregisterHotKey(source.Handle, Id);
-        var hook = modifierHook; modifierHook = null;
-        hook?.Dispose();
+        var old = hook; hook = null;
+        old?.Dispose();
     }
     /// Windows silently removes a low-level hook it once timed out, and an app cannot detect that, so the
-    /// modifier hook is installed afresh after each dictation, on unlock and on resume (and every minute).
-    /// Safe from any thread. Chords use RegisterHotKey and need nothing.
-    public void Rearm() => modifierHook?.Rearm();
+    /// hook is installed afresh after each dictation, on unlock and on resume (and every minute).
+    /// Safe from any thread.
+    public void Rearm() => hook?.Rearm();
+    /// The dictation ended or was declined (the Mac's resetGesture): the next press begins afresh, and the release
+    /// of a press still held does nothing.
+    public void ResetGesture() { lock (gate) { gesture.Reset(); epoch++; } }
     private nint Message(nint window, int message, nint wParam, nint lParam, ref bool handled)
     {
-        if (message == Native.WmHotkey && wParam.ToInt32() == Id) { handled = true; Fire(); }
+        if (message == Native.WmHotkey && wParam.ToInt32() == Id)
+        {
+            handled = true;
+            // A press the hook did not see means Windows dropped the hook.
+            if (enabled && Route(null, Step.Registered, 0, false)) Rearm();
+        }
         return 0;
     }
-    private void Fire() { if (enabled) Triggered?.Invoke(); }
+    private enum Step { Down, Up, OtherKey, Registered }
+    /// Called on the hook thread and on this one. Events are queued while locked, so they reach the app in the order
+    /// the keys moved, and only while the epoch that produced them is current. A replaced hook's late callback is ignored.
+    private bool Route(ShortcutHook? from, Step step, long milliseconds, bool clean)
+    {
+        lock (gate)
+        {
+            if (from != null && from != hook) return false;
+            var result = step switch
+            {
+                Step.Down => gesture.Down(milliseconds, clean),
+                Step.Up => gesture.Up(milliseconds),
+                Step.OtherKey => gesture.OtherKey(),
+                _ => gesture.Registered()
+            };
+            if (result == DictationGestureEvent.None) return false;
+            int expected = epoch;
+            dispatcher.BeginInvoke(() =>
+            {
+                bool current; lock (gate) current = expected == epoch;
+                if (enabled && current) Gesture?.Invoke(result);
+            });
+            return true;
+        }
+    }
+    private void Rehooked(ShortcutHook from) { lock (gate) if (from == hook) gesture.Rehooked(); }
     public static string Label(Shortcut value)
     {
         var parts = new List<string>();
@@ -79,21 +117,20 @@ internal sealed class HotkeyService : IDisposable
     }
     public void Dispose() { Disable(); source.RemoveHook(Message); source.Dispose(); }
 
-    /// The modifier-tap WH_KEYBOARD_LL hook, installed on and serviced by its own thread with its own message
+    /// The shortcut's WH_KEYBOARD_LL hook, installed on and serviced by its own thread with its own message
     /// loop. Windows calls a low-level hook through the installing thread's message loop and silently removes
     /// it after a timeout, so it must never wait behind the WPF thread (clipboard, audio device and panel
     /// work), and every keystroke on the system would wait with it. The Mac event tap runs on its own thread
-    /// for the same reason (Sources/Murmur/HotKeyMonitor.swift). The tap state lives only on this thread.
-    private sealed class ModifierHook : IDisposable
+    /// for the same reason (Sources/Murmur/HotKeyMonitor.swift). It never swallows a key.
+    private sealed class ShortcutHook : IDisposable
     {
         private const uint WmQuit = 0x0012, WmTimer = 0x0113, WmRearm = 0x8001; // WM_APP + 1.
         private const uint RearmEveryMs = 60_000, RetryMs = 250;
-        private static readonly int[] Modifiers = [0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0x5B, 0x5C];
-        private readonly int key;
+        private readonly Shortcut shortcut;
         private readonly bool allowSynthetic;
-        private readonly Action tapped;
+        private readonly HotkeyService owner;
         private readonly Native.HookProc proc; // Rooted for as long as the hook can call it.
-        private readonly ModifierTap tap = new();
+        private static readonly Func<int, bool> Held = Native.Held;
         private readonly ManualResetEventSlim started = new();
         private readonly Thread thread;
         private readonly object gate = new();
@@ -103,16 +140,16 @@ internal sealed class HotkeyService : IDisposable
         private nuint retry;
         private int startError;
 
-        private ModifierHook(int key, bool allowSynthetic, Action tapped)
+        private ShortcutHook(Shortcut shortcut, bool allowSynthetic, HotkeyService owner)
         {
-            this.key = key; this.allowSynthetic = allowSynthetic; this.tapped = tapped;
+            this.shortcut = shortcut; this.allowSynthetic = allowSynthetic; this.owner = owner;
             proc = Callback;
             thread = new Thread(Run) { IsBackground = true, Name = "Sona shortcut hook" };
         }
 
-        public static ModifierHook Start(int key, bool allowSynthetic, Action tapped)
+        public static ShortcutHook Start(Shortcut shortcut, bool allowSynthetic, HotkeyService owner)
         {
-            var hook = new ModifierHook(key, allowSynthetic, tapped);
+            var hook = new ShortcutHook(shortcut, allowSynthetic, owner);
             hook.thread.Start();
             if (!hook.started.Wait(TimeSpan.FromSeconds(3)) || hook.startError != 0)
             {
@@ -163,17 +200,17 @@ internal sealed class HotkeyService : IDisposable
 
         private nint Install() => Native.SetWindowsHookEx(Native.WhKeyboardLl, proc, Native.GetModuleHandle(null), 0);
 
-        // Never re-hook in the middle of a press: the release would arrive without its press and the tap would be lost.
+        // Never re-hook in the middle of a press: the release would arrive without its press and the gesture would be lost.
         private void RequestRearm()
         {
-            if (Native.AnyModifierHeld())
+            if (Native.AnyModifierHeld() || Native.Held(shortcut.VirtualKey))
             {
                 if (retry == 0) retry = SetTimer(0, 0, RetryMs, 0);
                 return;
             }
             if (retry != 0) { KillTimer(0, retry); retry = 0; }
             if (hook != 0) Native.UnhookWindowsHookEx(hook);
-            tap.Reset();
+            owner.Rehooked(this);
             hook = Install();
             // A failed install is retried on the next request; the minute timer keeps requesting.
         }
@@ -185,14 +222,10 @@ internal sealed class HotkeyService : IDisposable
                 int message = wParam.ToInt32(), pressed = Marshal.ReadInt32(data);
                 bool down = message is Native.WmKeydown or Native.WmSyskeydown;
                 bool up = message is Native.WmKeyup or Native.WmSyskeyup;
-                if (pressed != key) { if (down) tap.OtherKeyDown(); }
-                else if (down)
-                {
-                    bool other = false;
-                    foreach (int k in Modifiers) if (k != pressed && Native.Held(k)) { other = true; break; }
-                    tap.Down(Environment.TickCount64, other);
-                }
-                else if (up && tap.Up(Environment.TickCount64)) tapped();
+                // Only key downs of other keys count: a chord's modifiers come up in any order at the end of a hold.
+                if (pressed != shortcut.VirtualKey) { if (down) owner.Route(this, Step.OtherKey, 0, false); }
+                else if (down) owner.Route(this, Step.Down, Environment.TickCount64, DictationGesture.Clean(shortcut, Held));
+                else if (up) owner.Route(this, Step.Up, Environment.TickCount64, false);
             }
             return Native.CallNextHookEx(hook, code, wParam, data);
         }
