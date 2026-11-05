@@ -33,7 +33,8 @@ enum PCMSamples {
     }
 
     /// Calls `body` with each sample's frame, channel and value. False when
-    /// the sample format is not Float32 or Int16.
+    /// the sample format is not Float32 or Int16. A non-finite Float32 sample
+    /// reads as 0, as on Windows, so one bad sample cannot spread through the mix.
     private static func visit(_ buffer: AVAudioPCMBuffer, _ body: (Int, Int, Float) -> Void) -> Bool {
         let frames = Int(buffer.frameLength), channels = Int(buffer.format.channelCount)
         // Interleaved audio has one data pointer holding every channel.
@@ -48,7 +49,7 @@ enum PCMSamples {
         switch buffer.format.commonFormat {
         case .pcmFormatFloat32:
             guard let data = buffer.floatChannelData else { return false }
-            walk(data) { $0 }
+            walk(data) { $0.isFinite ? $0 : 0 }
         case .pcmFormatInt16:
             guard let data = buffer.int16ChannelData else { return false }
             walk(data) { Float($0) / 32768 }

@@ -684,6 +684,9 @@ var longest = Speechy(300.37, (11.0, 11.5), (100.0, 100.4), (250.0, 250.9));
 var longPieces = SpeechAudio.SpeechPieces(longest);
 Check(Covers(longPieces, longest.Length) && longPieces.All(p => p.Length <= 20 * 16000) && longPieces.SkipLast(1).All(p => p.Length >= 10 * 16000), "a 300 s recording becomes pieces of 10 to 20 s, ending exactly at the last sample");
 Check(longPieces.Any(p => p.Start / 16000.0 is > 11.0 and < 11.5) && longPieces.Any(p => p.Start / 16000.0 is > 100.0 and < 100.4), "cuts land in pauses when there are some in range");
+var edge = Speechy(20.05, (19.6, 20.05));
+var edgePieces = SpeechAudio.SpeechPieces(edge);
+Check(Covers(edgePieces, edge.Length) && edgePieces.Count == 2 && edgePieces.All(p => p.Length >= 16000), "no cut leaves a last piece under 1 s, even when the quietest spot is at the very end");
 var badLong = Speechy(45); badLong[5000] = float.NaN;
 Check(Covers(SpeechAudio.SpeechPieces(badLong), badLong.Length), "a non-finite sample does not break the cuts");
 Check(new AppSettings().MaximumRecordingSeconds == 300 && new AppSettings { MaximumRecordingSeconds = 900 }.Validate().MaximumRecordingSeconds == 300, "recordings run to 300 s by default, the most the pieces were measured on");
@@ -804,6 +807,29 @@ Check(leases.TryReuse(20, out var emptySnapshot) && emptySnapshot == null, "an e
 // Cancel and stall messages (parity UI-F8): an overrun says it stalled, in the panel; a user cancel says nothing.
 Check(DictationOutcome.Cancelled(byUser: false, quitting: false) == "Transcription stalled. Try again.", "a 120 s overrun shows the Mac's stall message");
 Check(DictationOutcome.Cancelled(byUser: true, quitting: false) == null && DictationOutcome.Cancelled(byUser: false, quitting: true) == null, "a user cancel or a quit shows nothing");
+Check(DictationOutcome.Cancelled(byUser: false, quitting: false, textKept: true) == "Text is ready in Copy last dictation.", "an overrun after the transcript was kept says the text is ready, like the Mac");
+Check(DictationOutcome.Cancelled(byUser: true, quitting: false, textKept: true) == null, "a user cancel shows nothing even when text was kept");
+Check(DictationGesture.IgnoredKey(0xAD) && DictationGesture.IgnoredKey(0xAF) && DictationGesture.IgnoredKey(0xB3) && DictationGesture.IgnoredKey(0xB7) && !DictationGesture.IgnoredKey(0xAC) && !DictationGesture.IgnoredKey(0xB8) && !DictationGesture.IgnoredKey(0x41), "volume, media and launch keys never cancel a hold; letters still do");
+var repeatGesture = new DictationGesture();
+repeatGesture.Down(0, true);
+Check(repeatGesture.Held && repeatGesture.KeyDown && repeatGesture.Down(30, true) == DictationGestureEvent.None, "a repeat during a live press is recognizable and starts nothing");
+repeatGesture.Reset();
+Check(!repeatGesture.Held && repeatGesture.KeyDown, "after a reset mid-hold, repeats are no longer a live press and pass through");
+string settingsDir = Path.Combine(Path.GetTempPath(), "sona-settings-" + Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(settingsDir);
+try
+{
+    string oldFile = Path.Combine(settingsDir, "v1.json"), chosenFile = Path.Combine(settingsDir, "v2.json"), handFile = Path.Combine(settingsDir, "v1-hand.json");
+    File.WriteAllText(oldFile, "{\"version\":1,\"setupComplete\":true,\"maximumRecordingSeconds\":120}");
+    File.WriteAllText(chosenFile, "{\"version\":2,\"setupComplete\":true,\"maximumRecordingSeconds\":120}");
+    File.WriteAllText(handFile, "{\"version\":1,\"setupComplete\":true,\"maximumRecordingSeconds\":90}");
+    var upgraded = SettingsStore.Load(oldFile);
+    Check(upgraded.MaximumRecordingSeconds == 300 && upgraded.Version == 2, "a 0.3.0 install's saved 120 s default becomes 300 s");
+    Check(SettingsStore.Load(chosenFile).MaximumRecordingSeconds == 120 && SettingsStore.Load(handFile).MaximumRecordingSeconds == 90, "a limit chosen after 0.4.0, or set by hand to another value, is kept");
+    SettingsStore.Save(oldFile, upgraded);
+    Check(SettingsStore.Load(oldFile).MaximumRecordingSeconds == 300 && System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(oldFile))!["version"]!.GetValue<int>() == 2, "the upgrade is saved as version 2");
+}
+finally { try { Directory.Delete(settingsDir, true); } catch { } }
 
 // Whisper annotations (parity P-F24): a segment that is only [BLANK_AUDIO] or (music) is never typed.
 Check(WhisperText.Join([" [BLANK_AUDIO]"]) == "" && WhisperText.Join([" (music)", " [Music] (applause)"]) == "", "annotation-only segments type nothing");

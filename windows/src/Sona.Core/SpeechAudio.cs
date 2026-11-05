@@ -76,10 +76,11 @@ public static class SpeechAudio
     /// Measured 2026-11-05 on 18 recordings of 250 to 300 s: one pass dropped a whole sentence in 3 of 12 and peaked
     /// at 4.2 GB; cutting at the quietest 0.3 s between 10 and 20 s after the previous cut lost nothing, scored
     /// 3.09% WER against 3.21% for the clips decoded one by one, and peaked at 1.95 GB. The Mac's Parakeet (FluidAudio)
-    /// also splits long audio into windows. A recording of 20 s or less stays one piece.
+    /// also splits long audio into windows. A recording of 20 s or less stays one piece, and no cut leaves a last
+    /// piece under 1 s, which would be too short for the model's features.
     public static IReadOnlyList<(int Start, int Length)> SpeechPieces(ReadOnlySpan<float> samples)
     {
-        const int hop = SampleRate / 100, low = 1000, high = 2000, window = 30; // 10 ms frames: 10 s, 20 s, 0.3 s.
+        const int hop = SampleRate / 100, low = 1000, high = 2000, window = 30, tail = 100; // 10 ms frames: 10 s, 20 s, 0.3 s, 1 s.
         int frames = (samples.Length + hop - 1) / hop;
         var pieces = new List<(int, int)>();
         if (frames <= high) { if (samples.Length > 0) pieces.Add((0, samples.Length)); return pieces; }
@@ -98,7 +99,7 @@ public static class SpeechAudio
         int start = 0;
         while (frames - start > high)
         {
-            int cut = start + low, end = Math.Min(start + high, frames);
+            int cut = start + low, end = Math.Min(start + high, frames - tail);
             double quietest = Moving(cut);
             for (int f = cut + 1; f < end; f++) { double m = Moving(f); if (m < quietest) { quietest = m; cut = f; } }
             pieces.Add((start * hop, cut * hop - start * hop));
