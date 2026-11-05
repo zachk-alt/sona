@@ -48,3 +48,21 @@ public sealed class ParakeetHealth
 
     public void Succeeded(string folder) { lock (failedFolders) decodeFailures.Remove(folder); }
 }
+
+/// Whisper's segments joined into one transcript. whisper.cpp models can emit a whole segment that is only an
+/// annotation, such as [BLANK_AUDIO] or (music), for audio with no words; it is dropped so it is never typed.
+/// Brackets inside spoken text are kept.
+public static class WhisperText
+{
+    private static readonly System.Text.RegularExpressions.Regex Annotation =
+        new(@"^\s*(?:(?:\[[^\[\]]*\]|\([^()]*\))\s*)+$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    public static bool IsAnnotation(string segment) => Annotation.IsMatch(segment);
+
+    public static string Join(IEnumerable<string> segments)
+    {
+        var text = new System.Text.StringBuilder();
+        foreach (var segment in segments) if (!IsAnnotation(segment)) text.Append(segment);
+        return text.ToString().Trim();
+    }
+}

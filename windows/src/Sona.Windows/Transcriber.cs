@@ -1,4 +1,3 @@
-using System.Text;
 using Whisper.net;
 using Whisper.net.LibraryLoader;
 using Sona.Core;
@@ -127,9 +126,9 @@ internal sealed class Transcriber : IDisposable
             .WithThreads(Threads).Build();
         try
         {
-            var text = new StringBuilder();
-            await foreach (var segment in processor.ProcessAsync(samples, cancellation)) text.Append(segment.Text);
-            return text.ToString().Trim();
+            var segments = new List<string>();
+            await foreach (var segment in processor.ProcessAsync(samples, cancellation)) segments.Add(segment.Text);
+            return WhisperText.Join(segments);
         }
         catch (Exception) when (cancellation.IsCancellationRequested)
         {

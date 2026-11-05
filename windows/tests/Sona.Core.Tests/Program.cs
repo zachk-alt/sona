@@ -715,6 +715,11 @@ Check(leases.TryReuse(20, out var emptySnapshot) && emptySnapshot == null, "an e
 // Cancel and stall messages (parity UI-F8): an overrun says it stalled, in the panel; a user cancel says nothing.
 Check(DictationOutcome.Cancelled(byUser: false, quitting: false) == "Transcription stalled. Try again.", "a 120 s overrun shows the Mac's stall message");
 Check(DictationOutcome.Cancelled(byUser: true, quitting: false) == null && DictationOutcome.Cancelled(byUser: false, quitting: true) == null, "a user cancel or a quit shows nothing");
+
+// Whisper annotations (parity P-F24): a segment that is only [BLANK_AUDIO] or (music) is never typed.
+Check(WhisperText.Join([" [BLANK_AUDIO]"]) == "" && WhisperText.Join([" (music)", " [Music] (applause)"]) == "", "annotation-only segments type nothing");
+Check(WhisperText.Join([" And so my fellow Americans,", " [BLANK_AUDIO]", " ask not."]) == "And so my fellow Americans, ask not.", "annotations between spoken segments are dropped");
+Check(WhisperText.Join([" Call f(x) at [noon] today."]) == "Call f(x) at [noon] today." && WhisperText.Join([" (laughs) that was fun"]) == "(laughs) that was fun", "brackets inside spoken text are kept");
 Console.WriteLine($"{tests} checks passed.");
 return 0;
 
