@@ -13,26 +13,33 @@ internal sealed class Transcriber : IDisposable
 {
     private static int Threads => Math.Max(1, Math.Min(Environment.ProcessorCount - 1, 6));
     // Parakeet stays loaded between dictations. Its native decode cannot be interrupted, so one gate serializes
-    // load, decode and release; a cancelled dictation stops waiting while the decode it started finishes on its own.
-    private readonly SemaphoreSlim parakeetGate = new(1, 1);
+    // load, decode and release. A dictation stops waiting at its time limit or on cancel while the decode it started
+    // finishes on its own, and a dictation that finds the gate held runs on Whisper instead of queueing.
+    private readonly EngineGate parakeetGate = new();
     private ParakeetRecognizer? parakeet;
     private readonly ParakeetHealth parakeetHealth = new();
     public ParakeetHealth Health => parakeetHealth;
 
     /// A WAV recording, through the one conversion both engines share.
     public Task<Transcript> TranscribeAsync(byte[] recording, SpeechRoute route, CancellationToken cancellation) =>
-        TranscribeAsync(SpeechAudio.Mono16k(recording), route, cancellation);
+        TranscribeAsync(SpeechAudio.Mono16k(recording), route, cancellation, null);
     public Task<string> TranscribeAsync(byte[] recording, string modelPath, string language, CancellationToken cancellation) =>
         TranscribeAsync(SpeechAudio.Mono16k(recording), modelPath, language, cancellation);
 
     /// Both engines hear the same 16 kHz mono samples (SpeechAudio.Mono16k).
     /// Parakeet first when the route has it and it has not failed; on a load or decode failure that dictation runs on
-    /// Whisper. Failures are logged as fixed codes with the exception type only, never text.
-    public async Task<Transcript> TranscribeAsync(float[] samples, SpeechRoute route, CancellationToken cancellation)
+    /// Whisper. Failures are logged as fixed codes with the exception type only, never text. Parakeet gets
+    /// DictationDeadlines.ParakeetLimit; past it, or while an earlier decode still holds Parakeet, Whisper transcribes the
+    /// same samples. A Parakeet result that arrives after this call stopped waiting for it goes to late.
+    public async Task<Transcript> TranscribeAsync(float[] samples, SpeechRoute route, CancellationToken cancellation, Action<string>? late)
     {
         if (route.ParakeetFolder != null && parakeetHealth.ShouldTry(route.ParakeetFolder))
         {
-            try { return new(await TranscribeParakeetAsync(samples, route.ParakeetFolder, cancellation), SpeechEngine.Parakeet); }
+            try
+            {
+                string? text = await TranscribeParakeetAsync(samples, route.ParakeetFolder, cancellation, late);
+                if (text != null) return new(text, SpeechEngine.Parakeet);
+            }
             catch (Exception e) when (SpeechEngines.FallBackToWhisper(e, cancellation.IsCancellationRequested))
             {
                 App.Log(e is ParakeetLoadException ? SpeechEngines.ParakeetLoadFailed : SpeechEngines.ParakeetDecodeFailed, e.InnerException ?? e);
@@ -46,41 +53,49 @@ internal sealed class Transcriber : IDisposable
     public Task PreloadParakeetAsync(string folder) => Task.Run(async () =>
     {
         if (!parakeetHealth.ShouldTry(folder)) return;
-        await parakeetGate.WaitAsync();
-        try { Load(folder); }
-        catch (ParakeetLoadException e) { App.Log(SpeechEngines.ParakeetLoadFailed, e.InnerException ?? e); }
-        finally { parakeetGate.Release(); }
+        await parakeetGate.RunAsync(() =>
+        {
+            try { Load(folder); }
+            catch (ParakeetLoadException e) { App.Log(SpeechEngines.ParakeetLoadFailed, e.InnerException ?? e); }
+        });
     });
 
     /// Frees the loaded Parakeet model, for a switch away from English. Skipped while a decode still runs.
-    public void ReleaseParakeet()
-    {
-        if (!parakeetGate.Wait(0)) return;
-        try { parakeet?.Dispose(); parakeet = null; }
-        finally { parakeetGate.Release(); }
-    }
+    public void ReleaseParakeet() => parakeetGate.TryRun(() => { parakeet?.Dispose(); parakeet = null; });
 
-    private async Task<string> TranscribeParakeetAsync(float[] samples, string folder, CancellationToken cancellation)
+    /// Null when Parakeet is busy or ran past its limit: the caller runs Whisper.
+    private async Task<string?> TranscribeParakeetAsync(float[] samples, string folder, CancellationToken cancellation, Action<string>? late)
     {
-        await parakeetGate.WaitAsync(cancellation);
-        var decode = Task.Run(() =>
+        int abandoned = 0;
+        var run = await parakeetGate.RunBoundedAsync(() =>
         {
-            try
+            var engine = Load(folder);
+            try { return engine.Transcribe(samples); }
+            catch (Exception)
             {
-                var engine = Load(folder);
-                try { string text = engine.Transcribe(samples); parakeetHealth.Succeeded(folder); return text; }
-                catch (Exception)
-                {
-                    // The recognizer may be in a bad state: drop it, reload on the next dictation.
-                    parakeetHealth.DecodeFailed(folder);
-                    try { engine.Dispose(); } catch { }
-                    parakeet = null;
-                    throw;
-                }
+                // The recognizer may be in a bad state: drop it, reload on the next dictation. A decode that already
+                // ran out of time was counted then.
+                if (Volatile.Read(ref abandoned) == 0) parakeetHealth.DecodeFailed(folder);
+                try { engine.Dispose(); } catch { }
+                parakeet = null;
+                throw;
             }
-            finally { parakeetGate.Release(); }
-        }, CancellationToken.None);
-        return await decode.WaitAsync(cancellation);
+        }, DictationDeadlines.ParakeetLimit(samples.Length / (double)SpeechAudio.SampleRate), cancellation, text =>
+        {
+            // Late: never a success that would clear the time-out, so a machine too slow for Parakeet stops using it.
+            if (!string.IsNullOrWhiteSpace(text)) late?.Invoke(text);
+        });
+        switch (run.Outcome)
+        {
+            case EngineOutcome.Completed: parakeetHealth.Succeeded(folder); return run.Value!;
+            case EngineOutcome.TimedOut:
+                Interlocked.Exchange(ref abandoned, 1);
+                // Counted like a failed decode: after MaximumDecodeFailures the folder is left to Whisper.
+                parakeetHealth.DecodeFailed(folder);
+                App.Log(SpeechEngines.ParakeetTimedOut, new TimeoutException());
+                return null;
+            default: return null; // Busy: an earlier decode, a load or a release still holds Parakeet.
+        }
     }
 
     // Caller holds the gate.

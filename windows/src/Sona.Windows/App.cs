@@ -47,6 +47,8 @@ internal sealed class App : Application
     private WordCorrection? correction;
     private bool ready, busy, recording, quitting;
     private string latest = "";
+    // Numbers each dictation, and names the one whose text is in latest, so a late result never replaces newer text.
+    private int session, deliveredSession;
     private string? sessionFailure;
     private System.Media.SoundPlayer? startCue, stopCue;
 
@@ -274,7 +276,7 @@ internal sealed class App : Application
         if (busy) return;
         if (!ready) { OpenSettings(); return; }
         StopLearning(); correction = null; sessionFailure = null;
-        busy = true;
+        busy = true; session++;
         try
         {
             operation = new CancellationTokenSource();
@@ -301,6 +303,7 @@ internal sealed class App : Application
     {
         if (!recording) return;
         recording = false; limit.Stop(); firstAudio.Stop();
+        int id = session;
         try
         {
             ShowPanel(() => panel?.Processing()); if (tray != null) tray.Text = "Sona: processing";
@@ -314,8 +317,10 @@ internal sealed class App : Application
             var speech = activeModel ?? SpeechModels.For(settings.Language);
             bool onParakeet = SpeechEngines.ForDictation(settings.Language, parakeetVerified) == SpeechEngine.Parakeet;
             var route = new SpeechRoute(ModelPath(speech), SpeechModels.WhisperLanguage(speech, settings.Language), onParakeet ? ParakeetFolder : null);
-            var text = (await transcriber.TranscribeAsync(samples, route, operation.Token)).Text;
+            var text = (await transcriber.TranscribeAsync(samples, route, operation.Token, late => Dispatcher.BeginInvoke(() => KeepLate(id, late)))).Text;
             if (string.IsNullOrWhiteSpace(text)) { sessionFailure = "No speech was detected."; return; }
+            // The exact raw transcript stays in Copy last dictation whatever happens to cleanup or the paste.
+            latest = text; deliveredSession = id;
             // Snippets run inside the bridge before optional cleanup, including when cleanup is off.
             string raw = text;
             text = BridgeProtocol.DictationText(await RequestAsync(BridgeProtocol.Dictate(raw, settings.CleanupEnabled), operation.Token), raw);
@@ -352,6 +357,16 @@ internal sealed class App : Application
             try { await recorder.StopAsync(); } catch { }
             Reset();
         }
+    }
+    // A transcript that arrived after its dictation stopped waiting (Parakeet past its limit, or the session past its
+    // budget) goes to Copy last dictation only, never into whatever is focused now, unless the dictation already
+    // delivered text or a newer one has (the Mac's retainLate).
+    private void KeepLate(int id, string text)
+    {
+        if (quitting || deliveredSession >= id) return;
+        latest = text; deliveredSession = id;
+        // Only while nothing newer owns the panel.
+        if (!busy) ShowPanel(() => { if (panel != null) panel.ShowError("Text is ready in Copy last dictation."); else Notify("Text is ready in Copy last dictation."); });
     }
     private static bool SpeechRuntimeFailed(Exception e) =>
         e is DllNotFoundException or TypeInitializationException ||

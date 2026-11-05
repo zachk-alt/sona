@@ -622,6 +622,51 @@ Check(fired == 0, "a -120 dBFS hum is still digital silence");
 var quiet = PinkNoise(48000 * 2, -70); int at = -1; live = new LiveAudio(48000, 2);
 for (int i = 0; i < quiet.Length; i++) if (live.Add(quiet[i])) { fired++; if (at < 0) at = i; }
 Check(fired == 1 && live.Heard && at == 48 * 30 * 2 - 1, "the first 30 ms window of real room sound is live, once");
+
+// Parakeet time limit (parity P-F11): busy or past the limit means Whisper; a late result is kept, not dropped.
+Check(DictationDeadlines.ParakeetLimit(0) == TimeSpan.FromSeconds(6) && DictationDeadlines.ParakeetLimit(-5) == TimeSpan.FromSeconds(6), "Parakeet gets at least 6 s");
+Check(DictationDeadlines.ParakeetLimit(10) == TimeSpan.FromSeconds(9), "a 10 s dictation gets 9 s, almost 5 times a laptop ten times slower than the bench");
+Check(DictationDeadlines.ParakeetLimit(120) <= TimeSpan.FromSeconds(45) && DictationDeadlines.ParakeetLimit(120) >= TimeSpan.FromSeconds(120 * 0.019 * 10 * 1.5), "a 120 s recording gets 1.5 times the slow laptop and leaves Whisper most of the session");
+Check(DictationDeadlines.ParakeetLimit(1000) == TimeSpan.FromSeconds(45), "the Parakeet limit is capped at 45 s");
+var engineGate = new EngineGate();
+var quick = await engineGate.RunBoundedAsync(() => "text", TimeSpan.FromSeconds(5), CancellationToken.None);
+Check(quick.Outcome == EngineOutcome.Completed && quick.Value == "text" && !engineGate.Busy, "a decode inside its limit returns its text and frees the engine");
+using (var hang = new ManualResetEventSlim())
+{
+    var lateText = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var slow = await engineGate.RunBoundedAsync(() => { hang.Wait(); return "late words"; }, TimeSpan.FromMilliseconds(100), CancellationToken.None, text => lateText.TrySetResult(text));
+    Check(slow.Outcome == EngineOutcome.TimedOut && engineGate.Busy, "a decode past its limit times out and still holds the engine");
+    bool ran = false;
+    var queued = await engineGate.RunBoundedAsync(() => { ran = true; return "x"; }, TimeSpan.FromSeconds(5), CancellationToken.None);
+    Check(queued.Outcome == EngineOutcome.Busy && !ran && !engineGate.TryRun(() => ran = true) && !ran, "the next dictation finds the engine busy and never queues behind a hung decode");
+    hang.Set();
+    Check(await lateText.Task.WaitAsync(TimeSpan.FromSeconds(5)) == "late words", "the overrun decode's late text is handed on, not dropped");
+    for (int i = 0; i < 100 && engineGate.Busy; i++) await Task.Delay(10);
+    Check(!engineGate.Busy, "the engine is free once the overrun decode really returns");
+}
+using (var hang = new ManualResetEventSlim())
+using (var cancel = new CancellationTokenSource())
+{
+    var lateText = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var running = engineGate.RunBoundedAsync(() => { hang.Wait(); return "after cancel"; }, TimeSpan.FromSeconds(30), cancel.Token, text => lateText.TrySetResult(text));
+    cancel.Cancel();
+    bool cancelled = false;
+    try { await running; } catch (OperationCanceledException) { cancelled = true; }
+    hang.Set();
+    Check(cancelled && await lateText.Task.WaitAsync(TimeSpan.FromSeconds(5)) == "after cancel", "a cancelled dictation stops waiting at once and its decode's text arrives late");
+}
+bool decodeFailed = false;
+try { await engineGate.RunBoundedAsync<string>(() => throw new InvalidDataException(), TimeSpan.FromSeconds(5), CancellationToken.None); }
+catch (InvalidDataException) { decodeFailed = true; }
+Check(decodeFailed && !engineGate.Busy, "a decode failure in time is rethrown for the Whisper fallback and frees the engine");
+using (var hang = new ManualResetEventSlim())
+{
+    bool lateCalled = false;
+    await engineGate.RunBoundedAsync<string>(() => { hang.Wait(); throw new InvalidDataException(); }, TimeSpan.FromMilliseconds(50), CancellationToken.None, _ => lateCalled = true);
+    hang.Set();
+    for (int i = 0; i < 100 && engineGate.Busy; i++) await Task.Delay(10);
+    Check(!lateCalled && !engineGate.Busy, "an overrun decode that then fails hands on nothing");
+}
 Console.WriteLine($"{tests} checks passed.");
 return 0;
 

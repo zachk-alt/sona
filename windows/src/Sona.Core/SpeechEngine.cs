@@ -10,6 +10,7 @@ public static class SpeechEngines
     public const string ParakeetLoadFailed = "parakeet_load_failed";
     public const string ParakeetDecodeFailed = "parakeet_decode_failed";
     public const string ParakeetDownloadFailed = "parakeet_download_failed";
+    public const string ParakeetTimedOut = "parakeet_timed_out";
 
     /// The engine the language prefers when every model is in place.
     public static SpeechEngine Preferred(string? language) => SpeechModels.IsEnglish(language) ? SpeechEngine.Parakeet : SpeechEngine.Whisper;
