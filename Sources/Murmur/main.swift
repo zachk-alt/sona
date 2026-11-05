@@ -109,8 +109,17 @@ if arguments.contains("--refresh-login-item") {
 
 // Headless pipeline check, usable before any permission is granted.
 if arguments.contains("--selftest") {
-    let file = arguments.last.flatMap { $0.hasSuffix(".wav") ? $0 : nil }
-    runCommand { await SelfTest.run(path: file) }
+    let files = arguments.filter { $0.hasSuffix(".wav") }
+    let engine = arguments.firstIndex(of: "--engine").flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil }
+    let realtime = arguments.contains("--realtime")
+    runCommand {
+        await SelfTest.run(paths: files, engine: engine, realtime: realtime) {
+            let recognizer = ParakeetRecognizer()
+            recognizer.startLoading()
+            await recognizer.waitUntilLoaded()
+            return recognizer
+        }
+    }
 }
 
 if arguments.contains("--doctor") {
@@ -239,7 +248,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var state: AppState?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let state = AppState()
+        let config = Config.load()
+        let state = AppState(config: config, makeTranscriber: SpeechEngines.makeFactory(config))
         state.start()
         self.state = state
     }

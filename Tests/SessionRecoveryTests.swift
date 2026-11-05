@@ -144,6 +144,7 @@ final class SessionRecoveryTests: NSObject, NSApplicationDelegate {
     static func deadlines(_ seconds: TimeInterval) -> AppState.Deadlines {
         var d = AppState.Deadlines(bridgeTimeout: 1)
         d.opening = seconds; d.transcribing = seconds; d.finishing = seconds; d.cancelling = seconds
+        d.transcribingPerRecordedSecond = 0
         return d
     }
 
@@ -174,6 +175,17 @@ final class SessionRecoveryTests: NSObject, NSApplicationDelegate {
 
     func run() async {
         await startTiming()
+        // A long recording gets more time to transcribe: Parakeet hears it
+        // all at the stop tap, and the Apple backup may replay all of it.
+        do {
+            let d = AppState.Deadlines(bridgeTimeout: 1)
+            check(d.transcribing(recordedSeconds: 0) == d.transcribing, "A short recording keeps the base transcribing deadline")
+            check(d.transcribing(recordedSeconds: -5) == d.transcribing, "A clock oddity never shortens the deadline")
+            check(d.transcribing(recordedSeconds: 600) >= d.transcribing + 20,
+                  "A 10-minute recording gets at least 20 s more to transcribe")
+            check(d.transcribing(recordedSeconds: 600) - d.stopGrace - d.parakeet >= 20,
+                  "After Parakeet's longest wait, the Apple backup still has 20 s for a 10-minute recording")
+        }
         // A healthy dictation returns to ready and the next press is accepted.
         do {
             let engine = FakeTranscriber()

@@ -50,14 +50,32 @@ final class AppState {
         /// found 100 to 150 ms enough). The `transcribing` deadline, armed at
         /// the stop tap, bounds this pause, the flush and the transcription.
         var stopGrace: TimeInterval = 0.12
-        /// Release to final transcript.
+        /// Release to final transcript, for a short recording. Longer
+        /// recordings get `transcribingPerRecordedSecond` more (see
+        /// `transcribing(recordedSeconds:)`).
         var transcribing: TimeInterval = 15
+        /// Extra release-to-transcript time per second recorded. Parakeet
+        /// hears the whole recording after the stop tap, and if it fails Apple
+        /// replays all of it. On an M5 Max a 10-minute recording took about
+        /// 3.4 s in Parakeet and 5 s in the Apple replay, so 1 s per 30 s
+        /// recorded (20 s more for 10 minutes) leaves room on slower Macs.
+        var transcribingPerRecordedSecond: TimeInterval = 1.0 / 30
+        /// Longest Parakeet may take at finish before Apple transcribes the
+        /// same audio instead (DictationTranscriber; shorter for short
+        /// recordings, EnginePolicy.parakeetLimit). Inside `transcribing`, so
+        /// the backup still has time to run.
+        var parakeet: TimeInterval = 10
         /// Transcript to inserted text: the bounded cleanup bridge plus insertion.
         var finishing: TimeInterval
         /// Discard to released analyzer.
         var cancelling: TimeInterval = 5
 
         init(bridgeTimeout: TimeInterval) { finishing = bridgeTimeout + 8 }
+
+        /// The `transcribing` deadline for a recording of this length.
+        func transcribing(recordedSeconds: Double) -> TimeInterval {
+            transcribing + max(0, recordedSeconds) * transcribingPerRecordedSecond
+        }
     }
 
     private var config: Config
@@ -468,8 +486,10 @@ final class AppState {
         firstAudioFallback = nil
 
         statusBar.showProcessing()
-        // Bounds the stop grace, the converter flush and the transcription.
-        arm(deadlines.transcribing, id, stage: "transcription did not finish",
+        // Bounds the stop grace, the converter flush and the transcription,
+        // with more time for a longer recording.
+        let recorded = sessionPressedAt.map { ProcessInfo.processInfo.systemUptime - $0 } ?? 0
+        arm(deadlines.transcribing(recordedSeconds: recorded), id, stage: "transcription did not finish",
             message: "Transcription stalled. Try again.")
 
         let opening = microphoneStart

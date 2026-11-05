@@ -36,7 +36,7 @@ For an assistant or scripted installation, specify your choices:
 # Completely local: --hotkey f8 --provider none
 ```
 
-The installer builds and installs `/Applications/Sona.app`, prepares a checksum-verified private Node runtime, and downloads Apple's speech assets if missing. It creates a local signing identity so updates preserve your Accessibility grant. Keychain may ask to let `codesign` use that identity. Grant **Microphone** and **Accessibility** when macOS asks. Sona does not request Input Monitoring. A missing Command Line Tools installation opens Apple's installer; finish it and rerun Sona's installer.
+The installer builds and installs `/Applications/Sona.app`, prepares a checksum-verified private Node runtime, and downloads Apple's speech assets if missing. When your Mac's language is English, Sona downloads its speech model, Parakeet Ultra (about 630 MB), on first launch, once from Hugging Face, pinned to one version and checked file by file against fixed SHA-256 hashes. Speech stays on your Mac. Apple's on-device engine serves until the model is ready and is the backup if Parakeet fails. Other languages use Apple's engine, and the model is not downloaded. To use Apple's engine only, add `"engine": "apple"` to the config. It creates a local signing identity so updates preserve your Accessibility grant. Keychain may ask to let `codesign` use that identity. Grant **Microphone** and **Accessibility** when macOS asks. Sona does not request Input Monitoring. A missing Command Line Tools installation opens Apple's installer; finish it and rerun Sona's installer.
 
 ### Windows
 
@@ -127,6 +127,8 @@ bash scripts/test-assistant-panel-placement.sh
 bash scripts/test-cues.sh
 bash scripts/test-session-recovery.sh
 bash scripts/test-exception-recovery.sh
+bash scripts/test-dictation-pipeline.sh
+bash scripts/test-speech-engine.sh
 bash scripts/test-audio-recovery.sh
 node --test bridge/test/*.test.mjs
 ./bundle.sh --no-install
@@ -144,8 +146,8 @@ MURMUR_BACKDROP=1 .build/release/Murmur --panel 6
 .build/release/Murmur --prepare-speech
 ```
 
-Preview modes use synthetic audio and do not open the microphone. `--doctor` reports the calling process's permissions; the running app's own status is authoritative. `--selftest` can exercise the Mac speech pipeline with a WAV file. CI checks both platform builds and shared cleanup behavior. Windows CI uses a public spoken fixture; microphone hardware and third-party application behavior still require the [manual checks](windows/docs/MANUAL-TESTS.md).
+Preview modes use synthetic audio and do not open the microphone. `--doctor` reports the calling process's permissions; the running app's own status is authoritative. `--selftest` can exercise the Mac speech pipeline with a WAV file, using the configured engine (`--engine apple` or `--engine parakeet` overrides it; the first Parakeet run downloads the model). CI checks both platform builds and shared cleanup behavior. Windows CI uses a public spoken fixture; microphone hardware and third-party application behavior still require the [manual checks](windows/docs/MANUAL-TESTS.md).
 
 ## License
 
-Sona source and original assets use the [Sona Source-Available License](LICENSE). Use and private edits are allowed; publishing or redistributing copies or modified versions requires prior written permission. See [LICENSING.md](LICENSING.md) for the earlier MIT version and GitHub platform rights. Dependencies keep their own licenses. Their notices ship with the Windows package and bundled Node runtime. AI provider and operating-system trademarks belong to their respective owners; Sona is not affiliated with them.
+Sona source and original assets use the [Sona Source-Available License](LICENSE). Use and private edits are allowed; publishing or redistributing copies or modified versions requires prior written permission. See [LICENSING.md](LICENSING.md) for the earlier MIT version and GitHub platform rights. Dependencies keep their own licenses. Their notices ship with the Windows package and bundled Node runtime. The Mac speech model, Parakeet Ultra by moondream (a post-training of NVIDIA's parakeet-tdt-0.6b-v3, used as FluidInference's converted Core ML copy), is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) and is not covered by Sona's license; FluidAudio, which runs it, is Apache-2.0. See [docs/THIRD-PARTY-MAC.md](docs/THIRD-PARTY-MAC.md) and About Sona in the menu. AI provider and operating-system trademarks belong to their respective owners; Sona is not affiliated with them.

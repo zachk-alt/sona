@@ -24,6 +24,11 @@ cp "$SONA_NODE_ROOT/bin/node" "$APP/Contents/Resources/runtime/node"
 cp "$SONA_NODE_ROOT/LICENSE" "$APP/Contents/Resources/runtime/NODE-LICENSE.txt"
 cp Resources/Sounds/*.wav "$APP/Contents/Resources/Sounds/"
 cp LICENSE "$APP/Contents/Resources/SONA-LICENSE.txt"
+# The Parakeet engine's license and the Mac speech credits (the model itself
+# downloads at first launch and is not in the app).
+cp .build/checkouts/FluidAudio/LICENSE "$APP/Contents/Resources/FLUIDAUDIO-LICENSE.txt"
+cp .build/checkouts/FluidAudio/ThirdPartyLicenses/fastcluster-LICENSE.md "$APP/Contents/Resources/FASTCLUSTER-LICENSE.txt"
+cp docs/THIRD-PARTY-MAC.md "$APP/Contents/Resources/THIRD-PARTY-MAC.md"
 
 # Build the macOS app icon from the exact user-supplied Sona artwork.
 # Keep the menu bar resources at their original sizes.

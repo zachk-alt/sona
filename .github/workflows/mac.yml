@@ -5,7 +5,8 @@ permissions:
 jobs:
   mac:
     runs-on: macos-26
-    timeout-minutes: 15
+    # FluidAudio (the Parakeet engine package) adds a fetch and a compile.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -21,6 +22,8 @@ jobs:
         run: bash scripts/test-exception-recovery.sh
       - name: Dictation pipeline (transcript assembly, converter flush)
         run: bash scripts/test-dictation-pipeline.sh
+      - name: Speech engine (engine choice, Apple backup, pinned model download, silence check)
+        run: bash scripts/test-speech-engine.sh
       - name: Focus and clipboard safety
         run: |
           mkdir -p .build/insertion-tests

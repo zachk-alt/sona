@@ -62,6 +62,11 @@ struct Config: Codable {
     /// Not an app-owned key: save() never writes or removes it, so only a hand
     /// edit turns it on or off.
     var debugTextLogUntil: Date? = nil
+    /// Speech engine as written in the file, "engine": "parakeet" or "apple".
+    /// Read through `speechEngine` (SpeechEngine.swift), which gives unknown
+    /// values the default (Parakeet). Not an app-owned key: save() never writes or removes it,
+    /// so whatever the user wrote stays exactly as written.
+    var engine: String? = nil
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case hotkey, snippets, autoAddToDictionary, setupComplete, ai, vocabulary, strictModeBundleIDs, claudePath, cleanupEnabled,
@@ -95,9 +100,11 @@ struct Config: Codable {
         if let setting = try? debug?.decodeIfPresent(DebugTextLogSetting.self, forKey: .debugTextLog) {
             debugTextLogUntil = Self.parseISO8601(setting.until)
         }
+        // A non-string value never fails the whole file; it gets the default.
+        engine = (try? debug?.decodeIfPresent(String.self, forKey: .engine)) ?? nil
     }
 
-    private enum DebugKeys: String, CodingKey { case debugTextLog }
+    private enum DebugKeys: String, CodingKey { case debugTextLog, engine }
     private struct DebugTextLogSetting: Decodable { let until: String }
 
     static func parseISO8601(_ text: String) -> Date? {

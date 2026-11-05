@@ -574,6 +574,10 @@ final class StatusBarController {
         config.target = self
         menu.addItem(config)
 
+        let about = NSMenuItem(title: "About Sona", action: #selector(showAbout), keyEquivalent: "")
+        about.target = self
+        menu.addItem(about)
+
         let quit = NSMenuItem(title: "Quit Sona", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
@@ -596,6 +600,23 @@ final class StatusBarController {
         rebuildMenu()
     }
     @objc private func quit() { onQuit?() }
+
+    /// AppKit's standard About panel, with the speech model and engine credits
+    /// (ThirdPartyCredits). Opened only from the menu, never during a dictation.
+    @objc private func showAbout() {
+        let credits = NSAttributedString(string: ThirdPartyCredits.text, attributes: [
+            .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+            .foregroundColor: NSColor.labelColor,
+        ])
+        do {
+            try catchingFrameworkException {
+                NSApp.activate()
+                NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Sona", .credits: credits])
+            }
+        } catch {
+            Log.write("about: panel failed to open")
+        }
+    }
 
     @objc private func openConfig() {
         Config.writeTemplateIfMissing()

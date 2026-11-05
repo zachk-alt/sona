@@ -69,6 +69,21 @@ enum Doctor {
                 : "\(english.count) English locales on disk, no download needed")
 
         let config = Config.load()
+        // Cheap check only (sizes plus the full-check stamp); the app itself
+        // downloads and checks the model at launch, never Doctor.
+        if config.speechEngine == .parakeet, !EnginePolicy.parakeetSupports(Locale.current) {
+            print("  [info] Speech engine: Apple (Parakeet serves English only; this Mac's language is " +
+                  "\(Locale.current.language.languageCode?.identifier ?? "unknown"))")
+        } else if config.speechEngine == .parakeet {
+            let store = ModelStore(manifest: .parakeetUltra, root: ModelStore.defaultRoot)
+            check("Parakeet model", store.isReadyCheap(),
+                  store.isReadyCheap()
+                    ? "downloaded and checked (\(store.manifest.commit.prefix(7)))"
+                    : "not downloaded yet. Sona downloads it at launch; Apple's engine serves until then.",
+                  fatal: false)
+        } else {
+            print("  [info] Speech engine: Apple (config \"engine\": \"apple\")")
+        }
         let claude = CLIResolver.resolve("claude", override: config.claudePath)
         check("Claude CLI", claude != nil,
               claude ?? "not found. Dictation still works, cleanup is skipped.",
