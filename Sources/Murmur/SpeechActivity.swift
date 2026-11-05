@@ -8,7 +8,7 @@ import Foundation
 ///
 /// Every engine is checked, as on Windows: Parakeet runs over the whole
 /// recording at once, so a silent press would reach the model with nothing to
-/// hear, and Apple can type a stray word over room noise. No speech means an
+/// hear, and Apple may type a stray word over room noise. No speech means an
 /// empty result, and an empty result types nothing.
 struct SpeechActivity {
     static let windowSeconds = 0.03

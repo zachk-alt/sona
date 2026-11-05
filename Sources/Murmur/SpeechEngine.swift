@@ -239,7 +239,7 @@ final class DictationTranscriber: Transcriber {
             return text
         }
         guard live == .parakeet, let parakeet else {
-            // Apple can type a stray word over room noise; no speech skips it.
+            // Apple may type a stray word over room noise; no speech skips it.
             let heard = meter.take()
             guard heard.hasSpeech else {
                 await apple.cancel()
