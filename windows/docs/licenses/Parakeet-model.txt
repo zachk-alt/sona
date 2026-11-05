@@ -1,0 +1,21 @@
+Parakeet TDT 0.6B v2 speech recognition model
+
+Creator: NVIDIA Corporation
+Original model: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2
+License: Creative Commons Attribution 4.0 International (CC BY 4.0)
+License text: https://creativecommons.org/licenses/by/4.0/legalcode
+License summary: https://creativecommons.org/licenses/by/4.0/
+
+Sona does not include or modify NVIDIA's original files. For English dictation it downloads a
+converted copy: an ONNX export of the model with int8 weights, made for sherpa-onnx and
+published by Hugging Face user csukuangfj (changes: converted from NeMo to ONNX, int8 weights), at
+https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8
+and pinned to commit 1ab9323565ddb038682214b292f588070a538ce2:
+
+  encoder.int8.onnx  652184296 bytes  SHA256 a32b12d17bbbc309d0686fbbcc2987b5e9b8333a7da83fa6b089f0a2acd651ab
+  decoder.int8.onnx    7257753 bytes  SHA256 b6bb64963457237b900e496ee9994b59294526439fbcc1fecf705b31a15c6b4e
+  joiner.int8.onnx     1739080 bytes  SHA256 7946164367946e7f9f29a122407c3252b680dbae9a51343eb2488d057c3c43d2
+  tokens.txt              9384 bytes  SHA256 ec182b70dd42113aff6c5372c75cac58c952443eb22322f57bbd7f53977d497d
+
+The model is provided by its licensors as is, without warranties. NVIDIA does not endorse Sona.
+Sona's own license does not apply to this model.

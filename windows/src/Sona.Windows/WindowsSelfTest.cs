@@ -68,6 +68,47 @@ internal static class WindowsSelfTest
                 checks["whisper_english_fixture_result"] = englishText;
                 string autoText = await transcriber.TranscribeAsync(fixtureBytes, model, "auto", switchCancellation.Token);
                 Check("whisper_switch_back_auto_country", autoText.ToLowerInvariant().Contains("country"));
+                // Parakeet, English's engine: fetch and verify the pinned files, transcribe the fixture on it, keep it
+                // loaded for a second run, then prove a Parakeet load failure falls back to Whisper base.en and that
+                // the good folder loads again afterwards.
+                Check("parakeet_native_packaged", File.Exists(Path.Combine(AppContext.BaseDirectory, "sherpa-onnx-c-api.dll")) && File.Exists(Path.Combine(AppContext.BaseDirectory, "onnxruntime.dll")));
+                Check("english_selects_parakeet", SpeechEngines.Preferred(new AppSettings().Language) == SpeechEngine.Parakeet
+                    && SpeechEngines.ForDictation("en", false) == SpeechEngine.Whisper && SpeechEngines.ForDictation("en", true) == SpeechEngine.Parakeet
+                    && SpeechEngines.ForDictation("auto", true) == SpeechEngine.Whisper && SpeechEngines.ForDictation("fr", true) == SpeechEngine.Whisper);
+                string parakeetFolder = Path.Combine(Path.GetDirectoryName(model)!, SpeechModels.Parakeet.FolderName);
+                var timer = System.Diagnostics.Stopwatch.StartNew();
+                await new VerifiedDownloader(http).DownloadAsync(parakeetFolder, SpeechModels.Parakeet, null, CancellationToken.None);
+                checks["parakeet_download_seconds"] = Math.Round(timer.Elapsed.TotalSeconds, 1);
+                Check("parakeet_model_sha256", await VerifiedDownloader.IsValidAsync(parakeetFolder, SpeechModels.Parakeet));
+                using var parakeetCancellation = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+                var englishRoute = new SpeechRoute(englishModel, SpeechModels.WhisperLanguage(SpeechModels.English, "en"), parakeetFolder);
+                timer.Restart();
+                var parakeet = await transcriber.TranscribeAsync(fixtureBytes, englishRoute, parakeetCancellation.Token);
+                checks["parakeet_first_run_seconds_with_load"] = Math.Round(timer.Elapsed.TotalSeconds, 2);
+                checks["parakeet_fixture_result"] = parakeet.Text; // Public JFK fixture only, never user speech.
+                Check("parakeet_engine_used", parakeet.Engine == SpeechEngine.Parakeet);
+                Check("parakeet_jfk_country", parakeet.Text.ToLowerInvariant().Contains("country"));
+                Check("parakeet_jfk_ask", parakeet.Text.ToLowerInvariant().Contains("ask"));
+                Check("parakeet_jfk_americans", parakeet.Text.ToLowerInvariant().Contains("americans"));
+                timer.Restart();
+                var warm = await transcriber.TranscribeAsync(fixtureBytes, englishRoute, parakeetCancellation.Token);
+                checks["parakeet_warm_run_seconds"] = Math.Round(timer.Elapsed.TotalSeconds, 2);
+                Check("parakeet_kept_loaded", warm.Engine == SpeechEngine.Parakeet && warm.Text == parakeet.Text);
+                string brokenFolder = Path.Combine(Path.GetDirectoryName(model)!, "parakeet-missing-files");
+                Directory.CreateDirectory(brokenFolder);
+                var fallback = await transcriber.TranscribeAsync(fixtureBytes, new SpeechRoute(englishModel, "en", brokenFolder), parakeetCancellation.Token);
+                checks["parakeet_fallback_fixture_result"] = fallback.Text;
+                Check("parakeet_fallback_whisper_country", fallback.Engine == SpeechEngine.Whisper && fallback.Text.ToLowerInvariant().Contains("country"));
+                Check("parakeet_failed_folder_not_retried", !transcriber.Health.ShouldTry(brokenFolder) && transcriber.Health.ShouldTry(parakeetFolder));
+                // The fallback is logged as a fixed code with the exception type only: no transcript words in sona.log.
+                string log = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Sona", "sona.log");
+                string logged = File.Exists(log) ? await File.ReadAllTextAsync(log) : "";
+                Check("parakeet_fallback_logged_code_no_text", logged.Contains(SpeechEngines.ParakeetLoadFailed, StringComparison.Ordinal)
+                    && !new[] { "country", "americans", "fellow" }.Any(word => logged.Contains(word, StringComparison.OrdinalIgnoreCase)));
+                var reloaded = await transcriber.TranscribeAsync(fixtureBytes, englishRoute, parakeetCancellation.Token);
+                Check("parakeet_reload_after_fallback", reloaded.Engine == SpeechEngine.Parakeet && reloaded.Text.ToLowerInvariant().Contains("country"));
+                var other = await transcriber.TranscribeAsync(fixtureBytes, new SpeechRoute(model, "auto", null), parakeetCancellation.Token);
+                Check("whisper_backup_auto_route", other.Engine == SpeechEngine.Whisper && other.Text.ToLowerInvariant().Contains("country"));
                 // Silence check on Windows, fed the way AudioRecorder feeds it: interleaved samples at the file's format.
                 using (var reader = new WaveFileReader(new MemoryStream(fixtureBytes, false)))
                 {

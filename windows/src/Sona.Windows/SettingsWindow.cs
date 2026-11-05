@@ -69,7 +69,8 @@ internal sealed class SettingsWindow : Window
         // A saved language outside this list is the user's choice: show it rather than replacing it on Save.
         if (!language.Items.Contains(settings.Language)) language.Items.Add(settings.Language);
         language.SelectedItem = settings.Language; stack.Children.Add(language);
-        stack.Children.Add(Description("English uses Whisper's English-only model, which tends to be more accurate for English. Auto and other languages use the multilingual model. Auto guesses the language on every recording."));
+        stack.Children.Add(Description("English uses NVIDIA Parakeet TDT 0.6B v2, run locally through sherpa-onnx, with Whisper's English-only model as the backup. Auto and other languages use Whisper's multilingual model. Auto guesses the language on every recording."));
+        stack.Children.Add(Description("Parakeet TDT 0.6B v2 by NVIDIA, licensed CC BY 4.0 (creativecommons.org/licenses/by/4.0). Sona uses a converted int8 copy (the sherpa-onnx export), not NVIDIA's original files. See THIRD-PARTY.md."));
         Label(stack, "Optional AI cleanup"); cleanup.IsChecked = settings.CleanupEnabled; stack.Children.Add(cleanup);
         foreach (var option in new[] {
             new ProviderOption("auto", "Automatic (installed CLI)"),
@@ -151,7 +152,7 @@ internal sealed class SettingsWindow : Window
         Label(stack, "Node executable (optional override)"); node.Text = settings.NodePath ?? ""; stack.Children.Add(node);
         stack.Children.Add(Description("The installer includes Node for the shared cleanup bridge. An existing Node 20+ installation can also be used; Gemini CLI requires Node 24+."));
         login.IsChecked = settings.StartAtLogin; login.Margin = new Thickness(0, 12, 0, 10); stack.Children.Add(login);
-        stack.Children.Add(Description("Setup downloads the verified Whisper base model for your language, about 148 MB: English-only for English, multilingual otherwise. Switching between English and another language downloads the other model once. Models stay in your local Sona folder. Sona keeps recordings and the last transcript in memory. Selected AI providers have their own retention policies."));
+        stack.Children.Add(Description("Setup downloads the verified Whisper base model for your language, about 148 MB: English-only for English, multilingual otherwise. For English, Save then downloads Parakeet in the background, about 661 MB; dictation keeps using Whisper until every Parakeet file is verified. Switching between English and another language downloads the other model once. Models stay in your local Sona folder. Sona keeps recordings and the last transcript in memory. Selected AI providers have their own retention policies."));
         stack.Children.Add(progress); stack.Children.Add(status); stack.Children.Add(save);
         var cancelSetup = new Button { Content = "Cancel setup download", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 8, 0, 0) };
         cancelSetup.Click += (_, _) => setupCancellation?.Cancel(); stack.Children.Add(cancelSetup);

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using Sona.Core;
@@ -381,6 +382,105 @@ Check(new[] { SpeechModels.English, SpeechModels.Multilingual }.All(m => m.Downl
     && m.Download.Url.AbsolutePath == "/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/" + m.FileName), "both models download from the same pinned whisper.cpp revision");
 Check(SpeechModels.WhisperLanguage(SpeechModels.English, "en") == "en" && SpeechModels.WhisperLanguage(SpeechModels.English, "EN") == "en"
     && SpeechModels.WhisperLanguage(SpeechModels.Multilingual, "auto") == "auto" && SpeechModels.WhisperLanguage(SpeechModels.Multilingual, "fr") == "fr", "English-only model always hears en");
+// Phase B: English runs on Parakeet once verified; Whisper is the backup and the engine for auto and other languages.
+Check(SpeechEngines.Preferred("en") == SpeechEngine.Parakeet && SpeechEngines.Preferred(" EN ") == SpeechEngine.Parakeet
+    && SpeechEngines.Preferred(new AppSettings().Language) == SpeechEngine.Parakeet, "English prefers Parakeet");
+Check(SpeechEngines.Preferred("auto") == SpeechEngine.Whisper && SpeechEngines.Preferred("fr") == SpeechEngine.Whisper
+    && SpeechEngines.Preferred("de") == SpeechEngine.Whisper && SpeechEngines.Preferred(null) == SpeechEngine.Whisper && SpeechEngines.Preferred("") == SpeechEngine.Whisper, "auto and other languages stay on Whisper");
+Check(SpeechEngines.ForDictation("en", parakeetVerified: false) == SpeechEngine.Whisper && SpeechEngines.ForDictation("en", parakeetVerified: true) == SpeechEngine.Parakeet,
+    "English dictates on Whisper until Parakeet is verified, then switches");
+Check(SpeechEngines.ForDictation("auto", true) == SpeechEngine.Whisper && SpeechEngines.ForDictation("ja", true) == SpeechEngine.Whisper, "a verified Parakeet never takes auto or other languages");
+Check(SpeechModels.For("en") == SpeechModels.English, "English keeps base.en as its Whisper backup");
+Check(SpeechEngines.FallBackToWhisper(new InvalidDataException(), cancelled: false) && SpeechEngines.FallBackToWhisper(new DllNotFoundException(), false)
+    && SpeechEngines.FallBackToWhisper(new SEHException(), false), "a Parakeet load or decode failure runs that dictation on Whisper");
+Check(!SpeechEngines.FallBackToWhisper(new OperationCanceledException(), false) && !SpeechEngines.FallBackToWhisper(new TaskCanceledException(), false)
+    && !SpeechEngines.FallBackToWhisper(new InvalidDataException(), cancelled: true), "a cancelled dictation is not retried on Whisper");
+Check(new[] { SpeechEngines.ParakeetLoadFailed, SpeechEngines.ParakeetDecodeFailed, SpeechEngines.ParakeetDownloadFailed }.All(code => System.Text.RegularExpressions.Regex.IsMatch(code, "^[a-z_]+$")),
+    "Parakeet failures log fixed codes");
+var health = new ParakeetHealth();
+Check(health.ShouldTry("A") && health.ShouldTry("B"), "Parakeet is tried until it fails");
+health.LoadFailed("A");
+Check(!health.ShouldTry("A") && !health.ShouldTry("a") && health.ShouldTry("B"), "a folder that failed to load is not retried this session; others still are");
+for (int i = 1; i < ParakeetHealth.MaximumDecodeFailures; i++) health.DecodeFailed("B");
+Check(health.ShouldTry("B"), "a failed decode retries a fresh load next time");
+health.Succeeded("B"); for (int i = 1; i < ParakeetHealth.MaximumDecodeFailures; i++) health.DecodeFailed("B");
+Check(health.ShouldTry("B"), "a success resets the decode failure count");
+health.DecodeFailed("B");
+Check(!health.ShouldTry("B"), $"{ParakeetHealth.MaximumDecodeFailures} decode failures in a row leave the folder to Whisper");
+// The pinned Parakeet bundle: four plain files from one Hugging Face commit, with LFS sizes and SHA-256.
+var parakeet = SpeechModels.Parakeet;
+Check(parakeet.Files.Select(f => f.Name).SequenceEqual(new[] { "encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt" }), "Parakeet bundle has its four files");
+Check(parakeet.Files.All(f => Path.GetFileName(f.Name) == f.Name && f.Download.Url.Scheme == "https" && f.Download.Url.Host == "huggingface.co"
+    && f.Download.Url.AbsolutePath == "/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/1ab9323565ddb038682214b292f588070a538ce2/" + f.Name
+    && f.Download.Sha256.Length == 64 && f.Download.Size > 0), "Parakeet files download from one pinned commit");
+Check(parakeet.Files[0].Download is { Size: 652184296, Sha256: "a32b12d17bbbc309d0686fbbcc2987b5e9b8333a7da83fa6b089f0a2acd651ab" }
+    && parakeet.Files[1].Download is { Size: 7257753, Sha256: "b6bb64963457237b900e496ee9994b59294526439fbcc1fecf705b31a15c6b4e" }
+    && parakeet.Files[2].Download is { Size: 1739080, Sha256: "7946164367946e7f9f29a122407c3252b680dbae9a51343eb2488d057c3c43d2" }
+    && parakeet.Files[3].Download is { Size: 9384, Sha256: "ec182b70dd42113aff6c5372c75cac58c952443eb22322f57bbd7f53977d497d" }
+    && parakeet.TotalSize == 661190513, "Parakeet sizes and SHA-256 match the pinned LFS metadata");
+string bundleTemp = Path.Combine(Path.GetTempPath(), "sona-bundle-" + Guid.NewGuid().ToString("N"));
+try
+{
+    byte[] one = Encoding.UTF8.GetBytes("first model file"), two = new byte[150000], three = Encoding.UTF8.GetBytes("tokens 0\n");
+    new Random(7).NextBytes(two);
+    DownloadSpec Spec(string name, byte[] bytes) => new(new Uri("https://example.invalid/bundle/" + name), bytes.Length, Convert.ToHexString(SHA256.HashData(bytes)));
+    var bundle = new ModelBundle("test-bundle", [new("a.onnx", Spec("a.onnx", one)), new("b.onnx", Spec("b.onnx", two)), new("tokens.txt", Spec("tokens.txt", three))]);
+    var served = new Dictionary<string, byte[]> { ["/bundle/a.onnx"] = one, ["/bundle/b.onnx"] = two, ["/bundle/tokens.txt"] = three };
+    var handler = new RoutesHandler(served);
+    using var bundleHttp = new HttpClient(handler);
+    string folder = Path.Combine(bundleTemp, bundle.FolderName);
+    Check(!await VerifiedDownloader.IsValidAsync(folder, bundle), "a missing bundle is not valid");
+    var reports = new List<double>();
+    await new VerifiedDownloader(bundleHttp).DownloadAsync(folder, bundle, new InlineProgress(reports.Add), CancellationToken.None);
+    Check(await VerifiedDownloader.IsValidAsync(folder, bundle) && handler.Requests == 3, "good bundle downloads every file and verifies");
+    Check(reports.Count > 0 && reports.Zip(reports.Skip(1)).All(pair => pair.Second >= pair.First) && reports[^1] == 1 && reports.All(r => r >= 0 && r <= 1), "bundle progress rises to 1 across files");
+    Check(!Directory.EnumerateFiles(folder).Any(f => f.EndsWith(".partial", StringComparison.Ordinal)), "no temporary files remain after a good bundle");
+    File.Delete(Path.Combine(folder, "b.onnx"));
+    Check(!await VerifiedDownloader.IsValidAsync(folder, bundle), "a bundle with a missing file is not valid");
+    await new VerifiedDownloader(bundleHttp).DownloadAsync(folder, bundle, null, CancellationToken.None);
+    Check(await VerifiedDownloader.IsValidAsync(folder, bundle) && handler.Requests == 4, "a missing file is fetched alone; verified files are kept");
+    // A run killed by shutdown or a hard exit leaves "name.guid.partial" behind; the next run clears them.
+    string orphanA = Path.Combine(folder, "a.onnx." + Guid.NewGuid().ToString("N") + ".partial");
+    string orphanB = Path.Combine(folder, "b.onnx." + Guid.NewGuid().ToString("N") + ".partial");
+    string unrelated = Path.Combine(folder, "notes.txt.partial");
+    foreach (var orphan in new[] { orphanA, orphanB, unrelated }) await File.WriteAllBytesAsync(orphan, new byte[4096]);
+    File.Delete(Path.Combine(folder, "a.onnx"));
+    await new VerifiedDownloader(bundleHttp).DownloadAsync(folder, bundle, null, CancellationToken.None);
+    Check(!File.Exists(orphanA) && !File.Exists(orphanB) && File.Exists(unrelated) && await VerifiedDownloader.IsValidAsync(folder, bundle) && handler.Requests == 5,
+        "leftover partials of the bundle's files are deleted on the next run; other files are kept");
+    File.Delete(unrelated);
+    await File.WriteAllBytesAsync(orphanB, new byte[16]);
+    await new VerifiedDownloader(bundleHttp).DownloadAsync(folder, bundle, null, CancellationToken.None);
+    Check(!File.Exists(orphanB) && handler.Requests == 5, "leftover partials are cleared even when every file already verifies");
+    await File.WriteAllBytesAsync(Path.Combine(folder, "tokens.txt"), Encoding.UTF8.GetBytes("tokens 1\n"));
+    Check(!await VerifiedDownloader.IsValidAsync(folder, bundle), "a file with the right size and the wrong hash on disk is not valid");
+    await File.WriteAllBytesAsync(Path.Combine(folder, "tokens.txt"), Encoding.UTF8.GetBytes("tokens 0\n extra"));
+    Check(!await VerifiedDownloader.IsValidAsync(folder, bundle), "a file with the wrong size on disk is not valid");
+    string fresh = Path.Combine(bundleTemp, "wrong-size");
+    served["/bundle/b.onnx"] = two.Take(two.Length - 1).ToArray();
+    bool wrongSize = false;
+    try { await new VerifiedDownloader(bundleHttp).DownloadAsync(fresh, bundle, null, CancellationToken.None); } catch (InvalidDataException) { wrongSize = true; }
+    Check(wrongSize && !File.Exists(Path.Combine(fresh, "b.onnx")) && !await VerifiedDownloader.IsValidAsync(fresh, bundle)
+        && !Directory.EnumerateFiles(fresh).Any(f => f.EndsWith(".partial", StringComparison.Ordinal)), "a short download is refused, never moved into place, and leaves no temp file");
+    served["/bundle/b.onnx"] = two.Concat(new byte[] { 1 }).ToArray();
+    bool tooLong = false;
+    try { await new VerifiedDownloader(bundleHttp).DownloadAsync(fresh, bundle, null, CancellationToken.None); } catch (InvalidDataException) { tooLong = true; }
+    Check(tooLong && !File.Exists(Path.Combine(fresh, "b.onnx")), "an oversized download is refused");
+    var tampered = (byte[])two.Clone(); tampered[100] ^= 0xFF; served["/bundle/b.onnx"] = tampered;
+    bool wrongHash = false;
+    try { await new VerifiedDownloader(bundleHttp).DownloadAsync(fresh, bundle, null, CancellationToken.None); } catch (InvalidDataException) { wrongHash = true; }
+    Check(wrongHash && !File.Exists(Path.Combine(fresh, "b.onnx")) && !await VerifiedDownloader.IsValidAsync(fresh, bundle)
+        && !Directory.EnumerateFiles(fresh).Any(f => f.EndsWith(".partial", StringComparison.Ordinal)), "a same-size download with the wrong hash is refused and never moved into place");
+    served.Remove("/bundle/tokens.txt"); served["/bundle/b.onnx"] = two;
+    bool missingRemote = false;
+    try { await new VerifiedDownloader(bundleHttp).DownloadAsync(fresh, bundle, null, CancellationToken.None); } catch (HttpRequestException) { missingRemote = true; }
+    Check(missingRemote && !await VerifiedDownloader.IsValidAsync(fresh, bundle) && !File.Exists(Path.Combine(fresh, "tokens.txt")), "a file missing on the server leaves the bundle invalid");
+    var unsafeBundle = new ModelBundle("bad", [new("../escape.onnx", Spec("x", one))]);
+    bool refusedName = false;
+    try { await new VerifiedDownloader(bundleHttp).DownloadAsync(Path.Combine(bundleTemp, "bad"), unsafeBundle, null, CancellationToken.None); } catch (InvalidDataException) { refusedName = true; }
+    Check(refusedName && !File.Exists(Path.Combine(bundleTemp, "escape.onnx")), "bundle file names cannot leave the model folder");
+}
+finally { if (Directory.Exists(bundleTemp)) Directory.Delete(bundleTemp, recursive: true); }
 // W3: per-window silence check on synthetic audio. Seeded, so every run is identical.
 var noiseRandom = new Random(20261104);
 double Gaussian() => Math.Sqrt(-2 * Math.Log(1 - noiseRandom.NextDouble())) * Math.Cos(2 * Math.PI * noiseRandom.NextDouble());
@@ -463,3 +563,16 @@ sealed class BytesHandler(byte[] bytes) : HttpMessageHandler
 }
 
 sealed class InlineProgress(Action<double> action) : IProgress<double> { public void Report(double value) => action(value); }
+
+sealed class RoutesHandler(Dictionary<string, byte[]> routes) : HttpMessageHandler
+{
+    public int Requests;
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Interlocked.Increment(ref Requests);
+        return Task.FromResult(routes.TryGetValue(request.RequestUri!.AbsolutePath, out var bytes)
+            ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) }
+            : new HttpResponseMessage(HttpStatusCode.NotFound));
+    }
+}

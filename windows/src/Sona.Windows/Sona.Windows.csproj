@@ -27,6 +27,12 @@
     <PackageReference Include="Whisper.net" Version="1.9.1" />
     <PackageReference Include="Whisper.net.Runtime" Version="1.9.1" GeneratePathProperty="true" ExcludeAssets="build;buildTransitive" />
     <PackageReference Include="Whisper.net.Runtime.NoAvx" Version="1.9.1" GeneratePathProperty="true" ExcludeAssets="build;buildTransitive" />
+    <!-- sherpa-onnx (Apache-2.0) runs Parakeet for English. Only its managed binding comes from NuGet. The NuGet runtime's
+         sherpa-onnx-c-api.dll also carries text to speech with espeak-ng (GPL-3.0-or-later) linked in, so its native files
+         are excluded here. build.ps1 downloads the official no-TTS build of the same version (sherpa-onnx-c-api.dll and
+         onnxruntime.dll), checks its pinned SHA-256, and passes its folder in as SherpaNativeDirectory. -->
+    <PackageReference Include="org.k2fsa.sherpa.onnx" Version="1.13.8" />
+    <PackageReference Include="org.k2fsa.sherpa.onnx.runtime.win-x64" Version="1.13.8" ExcludeAssets="native" />
     <None Include="../../../Resources/Sounds/*.wav" Link="sounds/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
     <None Include="../../../LICENSE" Link="SONA-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
     <None Include="../../docs/licenses/*.txt" Link="licenses/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
@@ -38,5 +44,27 @@
     <Content Include="$(PkgWhisper_net_Runtime)/build/win-x64/*.dll" Link="runtimes/win-x64/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
     <Content Include="$(PkgWhisper_net_Runtime_NoAvx)/build/win-x64/*.dll" Link="runtimes/noavx/win-x64/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
   </ItemGroup>
+  <!-- The verified no-TTS native pair, supplied by build.ps1. Without it the app still builds, and English falls back to Whisper. -->
+  <ItemGroup Condition="'$(SherpaNativeDirectory)' != ''">
+    <Content Include="$(SherpaNativeDirectory)/sherpa-onnx-c-api.dll;$(SherpaNativeDirectory)/onnxruntime.dll" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+  </ItemGroup>
   <!-- Native sidecars are explicitly selected above so package build targets cannot bundle the wrong platform. -->
+  <!-- sherpa-onnx's native pair stays beside Sona.exe, like Whisper's, so onnxruntime.dll loads from the app folder. -->
+  <!-- A sherpa-onnx-c-api.dll from any NuGet package is dropped from publish, so only the no-TTS build can ship. -->
+  <Target Name="KeepSherpaNativeBesideApp" AfterTargets="ComputeResolvedFilesToPublishList">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="'%(ResolvedFileToPublish.Filename)%(ResolvedFileToPublish.Extension)' == 'sherpa-onnx-c-api.dll' And '%(ResolvedFileToPublish.NuGetPackageId)' != ''" />
+      <ResolvedFileToPublish Condition="'%(ResolvedFileToPublish.Filename)%(ResolvedFileToPublish.Extension)' == 'sherpa-onnx-c-api.dll' Or '%(ResolvedFileToPublish.Filename)%(ResolvedFileToPublish.Extension)' == 'onnxruntime.dll'">
+        <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
+  <!-- License gate: publish fails if the shipped sherpa-onnx-c-api.dll carries espeak-ng (the text to speech build). -->
+  <Target Name="RefuseSherpaWithEspeak" AfterTargets="Publish">
+    <PropertyGroup>
+      <_SonaPublishedSherpa>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(PublishDir)', 'sherpa-onnx-c-api.dll'))</_SonaPublishedSherpa>
+      <_SonaSherpaHasEspeak Condition="Exists('$(_SonaPublishedSherpa)')">$([System.IO.File]::ReadAllText('$(_SonaPublishedSherpa)').Contains('espeak_ng_'))</_SonaSherpaHasEspeak>
+    </PropertyGroup>
+    <Error Condition="'$(_SonaSherpaHasEspeak)' == 'True'" Text="The published sherpa-onnx-c-api.dll contains espeak_ng_ (GPL-3.0-or-later text to speech). Ship the no-TTS build from build.ps1 instead." />
+  </Target>
 </Project>

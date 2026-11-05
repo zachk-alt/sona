@@ -1,6 +1,6 @@
 # Sona for Windows
 
-A native Windows tray dictation client. Tap your chosen shortcut to record, tap again to finish, and Sona transcribes locally with Whisper. Optional cleanup uses the shared Sona AI bridge and an account or API configuration you choose.
+A native Windows tray dictation client. Tap your chosen shortcut to record, tap again to finish, and Sona transcribes locally: English with NVIDIA Parakeet TDT 0.6B v2 through sherpa-onnx, with Whisper as the backup, and every other language with Whisper. Optional cleanup uses the shared Sona AI bridge and an account or API configuration you choose.
 
 This release targets **Windows 11 x64**. It does not support Windows 10, Windows on ARM, or UWP/mobile. The Windows app is separate from the macOS AppKit client.
 
@@ -20,7 +20,7 @@ For an already downloaded package:
 .\install-windows.ps1 -PackagePath .\Sona-windows-x64.zip -Sha256 '<hash from trusted SHA256SUMS.txt>'
 ```
 
-First launch lets you select a keyboard shortcut, microphone and speech language (English by default), then downloads the Whisper base model for that language: the English-only `ggml-base.en.bin` (147,964,211 bytes) for English, or the multilingual `ggml-base.bin` (147,951,465 bytes) for Auto and other languages. Each model URL is pinned to a source revision and its SHA256 is checked before use. An English install from an earlier version keeps dictating on its multilingual model and offers the one-time English download in Settings. Cancel or retry the download in setup. Speech recognition works offline after setup. Optional remote AI cleanup requires its own connection.
+First launch lets you select a keyboard shortcut, microphone and speech language (English by default), then downloads the Whisper base model for that language: the English-only `ggml-base.en.bin` (147,964,211 bytes) for English, or the multilingual `ggml-base.bin` (147,951,465 bytes) for Auto and other languages. Each model URL is pinned to a source revision and its SHA256 is checked before use. For English, saving Settings then downloads Parakeet in the background: four files, 661,190,513 bytes in all, each pinned to one Hugging Face commit and checked against its size and SHA256 (see `docs/THIRD-PARTY.md`). Every file downloads to a temporary name, is verified, then moved into place. English dictation keeps running on Whisper `ggml-base.en.bin` until all four Parakeet files verify, then switches. Nothing downloads before you save Settings. An English install from an earlier version keeps dictating on its current Whisper model and offers the one-time downloads in Settings. Cancel or retry the download in setup. Speech recognition works offline after setup. Optional remote AI cleanup requires its own connection.
 
 ## Microphone access
 
@@ -46,7 +46,12 @@ Local settings and the verified model live in `%LOCALAPPDATA%\Sona`:
 
 - `settings.json`: selected shortcut, device, language, startup and cleanup preferences.
 - `ai.json`: shared bridge configuration, vocabulary, and snippets.
-- `models\ggml-base.en.bin` (English) and/or `models\ggml-base.bin` (Auto and other languages): local speech models.
+- `models\ggml-base.en.bin` (English backup) and/or `models\ggml-base.bin` (Auto and other languages): local Whisper models.
+- `models\parakeet-tdt-0.6b-v2-int8\` (English): Parakeet's `encoder.int8.onnx`, `decoder.int8.onnx`, `joiner.int8.onnx` and `tokens.txt`.
+
+### Speech engines
+
+English runs on Parakeet, loaded once and kept in memory between dictations. The per-window silence check runs first, so a silent press types nothing on either engine. If Parakeet fails to load or throws on a dictation, that dictation runs on Whisper `ggml-base.en.bin` and `sona.log` records a fixed code (`parakeet_load_failed` or `parakeet_decode_failed`) with the exception type only, never any text. A folder that failed to load is not tried again until Sona restarts; three decode failures in a row do the same. Auto and every other language use Whisper's multilingual model.
 
 Recordings and the last transcript are held in memory. Sona does not write dictation history. Explicit manual copying changes the clipboard normally. Cleanup is enabled for new setups and can be turned off in settings. Auto selection only uses an installed supported CLI and falls back to the raw transcript when none is available. With cleanup on, the transcript is sent to the configured AI provider; account limits or API charges still apply. Existing CLI sign-in stays with that CLI. API credentials must be supplied via the provider's environment variable, not copied into Sona configuration.
 
@@ -62,7 +67,7 @@ Install the [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0), then
 .\windows\scripts\build.ps1
 ```
 
-The result is a self-contained single-file managed executable with native Whisper libraries, the bridge, and sounds as required sidecars. Keep the ZIP contents together when installing. Whisper's custom native loader needs its `runtimes/` layout preserved. Native CPU and NoAVX fallback packages are pinned to 1.9.1. NAudio.Wasapi is pinned to the .NET 8-compatible 2.4.0 line. No CUDA or GPU setup is required.
+The result is a self-contained single-file managed executable with native Whisper libraries, sherpa-onnx's native pair (`sherpa-onnx-c-api.dll` and `onnxruntime.dll`, from the official sherpa-onnx 1.13.8 no-TTS Windows build, which `build.ps1` downloads and checks by SHA-256, kept beside `Sona.exe`; a plain `dotnet publish` leaves the pair out, and English then falls back to Whisper), the bridge, and sounds as required sidecars. Keep the ZIP contents together when installing. Whisper's custom native loader needs its `runtimes/` layout preserved. Native CPU and NoAVX fallback packages are pinned to 1.9.1. NAudio.Wasapi is pinned to the .NET 8-compatible 2.4.0 line. No CUDA or GPU setup is required.
 
 The core executable tests run on macOS/Linux/Windows. A Windows-only smoke test is available:
 
@@ -70,13 +75,15 @@ The core executable tests run on macOS/Linux/Windows. A Windows-only smoke test 
 .\windows\artifacts\publish\Sona.exe --self-test .\windows-selftest.json --fixture .\windows\tests\Fixtures\jfk.wav
 ```
 
-It downloads the verified model, transcribes the public JFK fixture, runs the bridge in passthrough mode, and exercises only its own test window with synthetic keys and a temporary clipboard sentinel. It never opens a microphone or authenticates an AI account. If an interactive desktop cannot be activated, its report explicitly marks GUI checks skipped. CI runs this command and uploads the report with the build artifacts.
+It downloads the verified Whisper models and Parakeet, transcribes the public JFK fixture on each, checks that a Parakeet load failure falls back to Whisper and that Parakeet reloads afterwards, runs the bridge in passthrough mode, and exercises only its own test window with synthetic keys and a temporary clipboard sentinel. It never opens a microphone or authenticates an AI account. If an interactive desktop cannot be activated, its report explicitly marks GUI checks skipped. CI runs this command and uploads the report with the build artifacts.
 
 A successful cross-compile is not Windows runtime verification. Before calling a release fully tested, inspect the Windows CI report and complete `docs/MANUAL-TESTS.md` on a Windows 11 computer with a microphone and real target apps.
 
 ## License
 
 Sona's source and original assets use the repository `LICENSE`, included in the Windows package as `SONA-LICENSE.txt`. It permits use and private edits under its terms and restricts redistribution. The separate third-party licenses in `licenses/` remain unchanged.
+
+Parakeet TDT 0.6B v2 is NVIDIA's model, licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Sona downloads a converted copy (the int8 ONNX export made for sherpa-onnx), not NVIDIA's original files, and NVIDIA does not endorse Sona. sherpa-onnx is Apache-2.0 and ONNX Runtime is MIT. Credits and sources are in `docs/THIRD-PARTY.md` and `licenses/`.
 
 ## Dictation and personal phrases
 

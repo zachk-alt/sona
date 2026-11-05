@@ -3,11 +3,107 @@ using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
 using Whisper.net;
 using Whisper.net.LibraryLoader;
+using Sona.Core;
 
 namespace Sona.Windows;
 
+/// What one dictation runs on: Whisper always (the backup), and Parakeet first when its verified folder is given.
+internal sealed record SpeechRoute(string WhisperModelPath, string WhisperLanguage, string? ParakeetFolder);
+internal sealed record Transcript(string Text, SpeechEngine Engine);
+
 internal sealed class Transcriber : IDisposable
 {
+    private static int Threads => Math.Max(1, Math.Min(Environment.ProcessorCount - 1, 6));
+    // Parakeet stays loaded between dictations. Its native decode cannot be interrupted, so one gate serializes
+    // load, decode and release; a cancelled dictation stops waiting while the decode it started finishes on its own.
+    private readonly SemaphoreSlim parakeetGate = new(1, 1);
+    private ParakeetRecognizer? parakeet;
+    private readonly ParakeetHealth parakeetHealth = new();
+    public ParakeetHealth Health => parakeetHealth;
+
+    /// Parakeet first when the route has it and it has not failed; on a load or decode failure that dictation runs on
+    /// Whisper. Failures are logged as fixed codes with the exception type only, never text.
+    public async Task<Transcript> TranscribeAsync(byte[] recording, SpeechRoute route, CancellationToken cancellation)
+    {
+        if (route.ParakeetFolder != null && parakeetHealth.ShouldTry(route.ParakeetFolder))
+        {
+            try { return new(await TranscribeParakeetAsync(recording, route.ParakeetFolder, cancellation), SpeechEngine.Parakeet); }
+            catch (Exception e) when (SpeechEngines.FallBackToWhisper(e, cancellation.IsCancellationRequested))
+            {
+                App.Log(e is ParakeetLoadException ? SpeechEngines.ParakeetLoadFailed : SpeechEngines.ParakeetDecodeFailed, e.InnerException ?? e);
+            }
+        }
+        return new(await TranscribeAsync(recording, route.WhisperModelPath, route.WhisperLanguage, cancellation), SpeechEngine.Whisper);
+    }
+
+    /// Loads Parakeet ahead of the first dictation so that dictation does not wait for it. A failure is logged and
+    /// marks the folder failed, so English keeps running on Whisper.
+    public Task PreloadParakeetAsync(string folder) => Task.Run(async () =>
+    {
+        if (!parakeetHealth.ShouldTry(folder)) return;
+        await parakeetGate.WaitAsync();
+        try { Load(folder); }
+        catch (ParakeetLoadException e) { App.Log(SpeechEngines.ParakeetLoadFailed, e.InnerException ?? e); }
+        finally { parakeetGate.Release(); }
+    });
+
+    /// Frees the loaded Parakeet model, for a switch away from English. Skipped while a decode still runs.
+    public void ReleaseParakeet()
+    {
+        if (!parakeetGate.Wait(0)) return;
+        try { parakeet?.Dispose(); parakeet = null; }
+        finally { parakeetGate.Release(); }
+    }
+
+    private async Task<string> TranscribeParakeetAsync(byte[] recording, string folder, CancellationToken cancellation)
+    {
+        float[] samples = await Task.Run(() => Mono16k(recording), cancellation);
+        await parakeetGate.WaitAsync(cancellation);
+        var decode = Task.Run(() =>
+        {
+            try
+            {
+                var engine = Load(folder);
+                try { string text = engine.Transcribe(samples); parakeetHealth.Succeeded(folder); return text; }
+                catch (Exception)
+                {
+                    // The recognizer may be in a bad state: drop it, reload on the next dictation.
+                    parakeetHealth.DecodeFailed(folder);
+                    try { engine.Dispose(); } catch { }
+                    parakeet = null;
+                    throw;
+                }
+            }
+            finally { parakeetGate.Release(); }
+        }, CancellationToken.None);
+        return await decode.WaitAsync(cancellation);
+    }
+
+    // Caller holds the gate.
+    private ParakeetRecognizer Load(string folder)
+    {
+        if (parakeet != null && string.Equals(parakeet.Folder, folder, StringComparison.OrdinalIgnoreCase)) return parakeet;
+        parakeet?.Dispose(); parakeet = null;
+        try { parakeet = new ParakeetRecognizer(folder, Threads); return parakeet; }
+        catch (Exception e) { parakeetHealth.LoadFailed(folder); throw new ParakeetLoadException(e); }
+    }
+
+    /// The recording as 16 kHz mono float samples, through the same conversion Whisper's path uses.
+    internal static float[] Mono16k(byte[] recording)
+    {
+        using var raw = new MemoryStream(recording, false);
+        using var reader = new WaveFileReader(raw);
+        ISampleProvider audio = reader.ToSampleProvider();
+        if (audio.WaveFormat.Channels == 2) audio = new StereoToMonoSampleProvider(audio) { LeftVolume = 0.5f, RightVolume = 0.5f };
+        if (audio.WaveFormat.Channels != 1) throw new NotSupportedException("Choose a mono or stereo microphone in Windows sound settings.");
+        if (audio.WaveFormat.SampleRate != ParakeetRecognizer.SampleRate) audio = new WdlResamplingSampleProvider(audio, ParakeetRecognizer.SampleRate);
+        var samples = new List<float>(ParakeetRecognizer.SampleRate * 30);
+        var buffer = new float[ParakeetRecognizer.SampleRate];
+        int read;
+        while ((read = audio.Read(buffer, 0, buffer.Length)) > 0) samples.AddRange(new ArraySegment<float>(buffer, 0, read));
+        return samples.ToArray();
+    }
+
     private WhisperFactory? factory;
     private string? factoryPath;
     // A processor whose dispose did not finish may still run on its factory. Such a factory is kept alive,
@@ -34,7 +130,7 @@ internal sealed class Transcriber : IDisposable
         WaveFileWriter.WriteWavFileToStream(wave, audio.ToWaveProvider16());
         wave.Position = 0;
         var processor = factory.CreateBuilder().WithLanguage(language).WithNoContext()
-            .WithThreads(Math.Max(1, Math.Min(Environment.ProcessorCount - 1, 6))).Build();
+            .WithThreads(Threads).Build();
         try
         {
             var text = new StringBuilder();
@@ -52,5 +148,12 @@ internal sealed class Transcriber : IDisposable
             try { await processor.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)); } catch { processorMayLinger = true; }
         }
     }, cancellation);
-    public void Dispose() { factory?.Dispose(); factory = null; }
+    public void Dispose()
+    {
+        factory?.Dispose(); factory = null;
+        ReleaseParakeet();
+    }
 }
+
+/// Parakeet could not be created for its folder. The dictation falls back to Whisper.
+internal sealed class ParakeetLoadException(Exception inner) : Exception("Parakeet did not load.", inner);

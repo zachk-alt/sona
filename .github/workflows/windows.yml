@@ -10,7 +10,8 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 25
+    # The self-test also downloads Parakeet (about 661 MB) and runs it, on top of the two Whisper models.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -37,7 +38,7 @@ jobs:
           $fixture = Join-Path $env:GITHUB_WORKSPACE 'windows/tests/Fixtures/jfk.wav'
           $installed = Join-Path $env:LOCALAPPDATA 'Programs/Sona/Sona.exe'
           $process = Start-Process -FilePath $installed -ArgumentList '--self-test', "`"$report`"", '--fixture', "`"$fixture`"" -PassThru
-          if (-not $process.WaitForExit(600000)) { Stop-Process -Id $process.Id; throw 'Windows self-test exceeded ten minutes.' }
+          if (-not $process.WaitForExit(1200000)) { Stop-Process -Id $process.Id; throw 'Windows self-test exceeded twenty minutes.' }
           if (Test-Path $report) {
             Get-Content $report
           }

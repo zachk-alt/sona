@@ -17,6 +17,10 @@ internal sealed class App : Application
     private string ConfigPath => Path.Combine(data, "settings.json");
     private string AiPath => Path.Combine(data, "ai.json");
     private string ModelPath(SpeechModel model) => Path.Combine(data, "models", model.FileName);
+    private string ParakeetFolder => Path.Combine(data, "models", SpeechModels.Parakeet.FolderName);
+    // English dictation switches to Parakeet only after all of its files verify; until then it runs on Whisper base.en.
+    private bool parakeetVerified;
+    private CancellationTokenSource? parakeetDownload;
     // The verified model file dictation runs: the language's own model, or for an English install from before
     // the English-only model, its verified multilingual model until Settings downloads base.en.
     private SpeechModel? activeModel;
@@ -142,9 +146,14 @@ internal sealed class App : Application
             else if (wanted != SpeechModels.Multilingual && await VerifiedDownloader.IsValidAsync(ModelPath(SpeechModels.Multilingual), SpeechModels.Multilingual.Download))
                 activeModel = SpeechModels.Multilingual;
             ready = activeModel != null;
-            if (activeModel == wanted) ResumeShortcut();
-            // Migration: dictation keeps working on the verified multilingual model; Save in Settings fetches base.en.
-            else if (ready) OpenSettings("Sona now uses Whisper's English-only model for English, which tends to be more accurate. Save to download it once (about 148 MB). Until then, dictation keeps using the current model.");
+            bool wantsParakeet = SpeechEngines.Preferred(settings.Language) == SpeechEngine.Parakeet;
+            // Hashing about 661 MB runs off the UI thread.
+            parakeetVerified = wantsParakeet && await Task.Run(() => VerifiedDownloader.IsValidAsync(ParakeetFolder, SpeechModels.Parakeet));
+            if (parakeetVerified) _ = transcriber.PreloadParakeetAsync(ParakeetFolder);
+            if (activeModel == wanted && (!wantsParakeet || parakeetVerified)) ResumeShortcut();
+            // Migration: dictation keeps working on the verified Whisper model; Save in Settings fetches what is missing.
+            else if (ready && activeModel == wanted) OpenSettings($"Sona now uses NVIDIA Parakeet as its English engine, with Whisper as the backup. Save to download it once (about {SpeechModels.Parakeet.TotalSize / 1_000_000} MB, in the background). Until it is verified, dictation keeps using Whisper.");
+            else if (ready) OpenSettings("Sona now uses Whisper's English-only model as the English backup and NVIDIA Parakeet as the English engine. Save to download them once (about 148 MB, then about " + SpeechModels.Parakeet.TotalSize / 1_000_000 + " MB in the background). Until then, dictation keeps using the current model.");
             else OpenSettings();
         }
         catch { OpenSettings(); }
@@ -214,6 +223,36 @@ internal sealed class App : Application
             throw;
         }
         settings = next; activeModel = speech; ready = true;
+        if (SpeechEngines.Preferred(next.Language) == SpeechEngine.Parakeet) StartParakeetDownload();
+        else { parakeetDownload?.Cancel(); parakeetVerified = false; transcriber.ReleaseParakeet(); }
+    }
+    // Runs after the user saved Settings, never before. Dictation stays on Whisper until every Parakeet file verifies.
+    private void StartParakeetDownload()
+    {
+        parakeetDownload?.Cancel();
+        var cancellation = parakeetDownload = new CancellationTokenSource();
+        _ = DownloadParakeetAsync(cancellation.Token);
+    }
+    private async Task DownloadParakeetAsync(CancellationToken cancellation)
+    {
+        bool wasVerified = parakeetVerified;
+        try
+        {
+            // Off the UI thread: about 661 MB to fetch and hash. Files that already verify are kept.
+            string folder = ParakeetFolder;
+            await Task.Run(() => new VerifiedDownloader(http).DownloadAsync(folder, SpeechModels.Parakeet, null, cancellation), cancellation);
+            if (cancellation.IsCancellationRequested || quitting || SpeechEngines.Preferred(settings.Language) != SpeechEngine.Parakeet) return;
+            await transcriber.PreloadParakeetAsync(folder);
+            parakeetVerified = true;
+            // A load failure is already logged and leaves English on Whisper; only a working switch is announced.
+            if (!wasVerified && !quitting && transcriber.Health.ShouldTry(folder)) Notify("English dictation now uses NVIDIA Parakeet. Whisper stays as the backup.");
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+        catch (Exception e)
+        {
+            Log(SpeechEngines.ParakeetDownloadFailed, e);
+            if (!quitting) Notify("The Parakeet download did not finish. English dictation keeps using Whisper. Save Settings to try again.");
+        }
     }
     private async Task ToggleAsync()
     {
@@ -259,7 +298,9 @@ internal sealed class App : Application
             if (!audible || audio.Length < 4000) { sessionFailure = "No speech was detected."; return; }
             operation!.CancelAfter(TimeSpan.FromSeconds(120));
             var speech = activeModel ?? SpeechModels.For(settings.Language);
-            var text = await transcriber.TranscribeAsync(audio, ModelPath(speech), SpeechModels.WhisperLanguage(speech, settings.Language), operation.Token);
+            bool onParakeet = SpeechEngines.ForDictation(settings.Language, parakeetVerified) == SpeechEngine.Parakeet;
+            var route = new SpeechRoute(ModelPath(speech), SpeechModels.WhisperLanguage(speech, settings.Language), onParakeet ? ParakeetFolder : null);
+            var text = (await transcriber.TranscribeAsync(audio, route, operation.Token)).Text;
             if (string.IsNullOrWhiteSpace(text)) { sessionFailure = "No speech was detected."; return; }
             // Snippets run inside the bridge before optional cleanup, including when cleanup is off.
             string raw = text;
@@ -439,7 +480,7 @@ internal sealed class App : Application
     }
     private async Task QuitAsync()
     {
-        quitting = true; hotkey?.Disable(); await CancelAsync();
+        quitting = true; hotkey?.Disable(); parakeetDownload?.Cancel(); await CancelAsync();
         SystemEvents.SessionSwitch -= OnSessionSwitch; SystemEvents.PowerModeChanged -= OnPowerModeChanged;
         // Native inference receives cancellation. Do not dispose its factory while a call is active.
         if (!busy) transcriber.Dispose();
