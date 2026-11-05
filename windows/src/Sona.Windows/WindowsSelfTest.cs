@@ -106,7 +106,8 @@ internal static class WindowsSelfTest
                     Check("reopen_signal_sent", ReopenSignal.Send(reopenName));
                     Check("reopen_signal_opens_settings_callback", await Task.WhenAny(reopened.Task, Task.Delay(5000)) == reopened.Task);
                 }
-                Check("reopen_without_listener_falls_back", !ReopenSignal.Send(reopenName));
+                // A name nobody listens on (the disposed listener's event can outlive Dispose for a moment).
+                Check("reopen_without_listener_falls_back", !ReopenSignal.Send(reopenName + ".None"));
             }
             // ---- End of UI parity checks. ----
             string bridge = Path.Combine(AppContext.BaseDirectory, "bridge", "sona-cleanup.mjs");
