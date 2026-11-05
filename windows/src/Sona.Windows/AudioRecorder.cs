@@ -9,9 +9,7 @@ internal sealed class AudioRecorder : IDisposable
     private readonly object gate = new();
     private WasapiCapture? capture;
     private MMDevice? device;
-    private WaveFileWriter? writer;
-    private MemoryStream? memory;
-    private TaskCompletionSource<Exception?>? stopped;
+    private CaptureRecording? recording;
     public event Action<float>? Level;
     /// 48 voice bands, low to high, about ten times a second on the capture thread (Mac AudioCapture.updateSpectrum).
     public event Action<float[]>? Spectrum;
@@ -39,9 +37,7 @@ internal sealed class AudioRecorder : IDisposable
         device = string.IsNullOrEmpty(deviceId) ? enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Communications) : enumerator.GetDevice(deviceId);
         capture = new WasapiCapture(device);
         lock (gate) { Generation++; live = new LiveAudio(capture.WaveFormat.SampleRate, capture.WaveFormat.Channels); }
-        memory = new MemoryStream();
-        writer = new WaveFileWriter(memory, capture.WaveFormat);
-        stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (gate) recording = new CaptureRecording(capture.WaveFormat);
         capture.DataAvailable += OnData;
         capture.RecordingStopped += OnStopped;
         capture.StartRecording();
@@ -55,9 +51,8 @@ internal sealed class AudioRecorder : IDisposable
         lock (gate)
         {
             // A capture disposed in the background must never write into the next session.
-            if (writer == null || capture == null || !ReferenceEquals(sender, capture)) return;
+            if (recording == null || capture == null || !ReferenceEquals(sender, capture) || !recording.Write(e.Buffer, e.BytesRecorded)) return;
             generation = Generation;
-            writer.Write(e.Buffer, 0, e.BytesRecorded);
             var format = capture.WaveFormat;
             bool floating = format.Encoding == WaveFormatEncoding.IeeeFloat ||
                 format is WaveFormatExtensible ext && ext.SubFormat == new Guid("00000003-0000-0010-8000-00aa00389b71");
@@ -98,18 +93,22 @@ internal sealed class AudioRecorder : IDisposable
     private void OnStopped(object? sender, StoppedEventArgs e)
     {
         if (!ReferenceEquals(sender, capture)) return; // A late stop from an earlier, already replaced capture.
-        lock (gate) { writer?.Dispose(); writer = null; }
-        stopped?.TrySetResult(e.Exception);
+        CaptureRecording? current;
+        lock (gate) current = recording;
+        current?.Stopped(e.Exception);
         if (!stopping) UnexpectedStop?.Invoke(e.Exception);
     }
-    public async Task<byte[]> StopAsync()
+    /// Everything captured, never an exception: a stop that errors or does not confirm within 5 s still returns the
+    /// audio already recorded, and says how the capture ended.
+    public async Task<CaptureResult> StopAsync()
     {
-        if (capture == null || stopped == null) return [];
+        CaptureRecording? current;
+        lock (gate) current = recording;
+        if (capture == null || current == null) return new([], CaptureEnd.Clean);
         stopping = true;
-        capture.StopRecording();
-        var error = await stopped.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        if (error != null) throw error;
-        return memory?.ToArray() ?? [];
+        try { if (!current.HasStopped) capture.StopRecording(); }
+        catch (Exception e) when (e is not OutOfMemoryException) { return new(current.Seal(), CaptureEnd.Failed, e); }
+        return await current.FinishAsync(TimeSpan.FromSeconds(5));
     }
     public void Dispose()
     {
@@ -125,6 +124,6 @@ internal sealed class AudioRecorder : IDisposable
                 try { old?.Dispose(); } catch { }
                 try { oldDevice?.Dispose(); } catch { }
             });
-        lock (gate) { writer?.Dispose(); writer = null; memory?.Dispose(); memory = null; }
+        lock (gate) { recording?.Dispose(); recording = null; }
     }
 }

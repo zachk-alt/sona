@@ -667,6 +667,26 @@ using (var hang = new ManualResetEventSlim())
     for (int i = 0; i < 100 && engineGate.Busy; i++) await Task.Delay(10);
     Check(!lateCalled && !engineGate.Busy, "an overrun decode that then fails hands on nothing");
 }
+
+// Microphone loss and stop faults (parity P-F7, P-M3): the audio already captured is always handed back.
+byte[] FloatBytes(float[] x) { var b = new byte[x.Length * 4]; Buffer.BlockCopy(x, 0, b, 0, b.Length); return b; }
+var spoken = FloatBytes(Tone(1000, 48000, 1));
+var dropped = new CaptureRecording(NAudio.Wave.WaveFormat.CreateIeeeFloatWaveFormat(48000, 1));
+dropped.Write(spoken, spoken.Length);
+dropped.Stopped(new IOException("device removed"));
+Check(!dropped.Write(spoken, spoken.Length), "a capture that stopped takes no more audio");
+var droppedResult = await dropped.FinishAsync(TimeSpan.FromSeconds(1));
+var droppedAudio = SpeechAudio.Mono16k(droppedResult.Wav);
+Check(droppedResult.End == CaptureEnd.Failed && droppedResult.Error is IOException && droppedAudio.Length == 16000 && Math.Abs(ToneDb(droppedAudio, 1000)) < 0.1, "a microphone that goes away mid-dictation keeps the audio it captured");
+var hung = new CaptureRecording(NAudio.Wave.WaveFormat.CreateIeeeFloatWaveFormat(48000, 1));
+hung.Write(spoken, spoken.Length);
+var hungResult = await hung.FinishAsync(TimeSpan.FromMilliseconds(50));
+Check(hungResult.End == CaptureEnd.TimedOut && SpeechAudio.Mono16k(hungResult.Wav).Length == 16000, "a stop that never confirms returns the audio within its deadline, with a valid WAV header");
+Check(!hung.Write(spoken, spoken.Length) && SpeechAudio.Mono16k(hung.Seal()).Length == 16000, "a capture thread that outlives a timed-out stop cannot change the result");
+var clean = new CaptureRecording(NAudio.Wave.WaveFormat.CreateIeeeFloatWaveFormat(48000, 1));
+clean.Write(spoken, spoken.Length); clean.Stopped(null);
+var cleanResult = await clean.FinishAsync(TimeSpan.FromSeconds(1));
+Check(cleanResult.End == CaptureEnd.Clean && cleanResult.Error == null && SpeechAudio.Mono16k(cleanResult.Wav).Length == 16000, "a clean stop returns the whole recording");
 Console.WriteLine($"{tests} checks passed.");
 return 0;
 

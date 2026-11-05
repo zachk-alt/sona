@@ -143,9 +143,16 @@ internal sealed class App : Application
             firstAudio.Stop();
             if (recording) ShowRecording(recordingStart?.DeadlinePassed() ?? RecordingCue.None);
         };
+        // A microphone that goes away mid-dictation ends the recording early, and what it heard is still transcribed.
         recorder.UnexpectedStop += e => Dispatcher.BeginInvoke(async () =>
         {
-            try { await CancelAsync(); Notify("The microphone stopped. Check your selected device and Windows microphone access."); }
+            try
+            {
+                if (!recording) return;
+                Log("microphone_stopped", e ?? new IOException());
+                Notify("The microphone stopped, so Sona ended the recording early. Check your selected device and Windows microphone access.");
+                await FinishAsync();
+            }
             catch (Exception error) { Recover("microphone", error); }
         });
         limit.Tick += async (_, _) =>
@@ -307,7 +314,10 @@ internal sealed class App : Application
         try
         {
             ShowPanel(() => panel?.Processing()); if (tray != null) tray.Text = "Sona: processing";
-            var audio = await recorder.StopAsync();
+            var captured = await recorder.StopAsync();
+            // A stop that errored or never confirmed still hands back the audio already recorded.
+            if (captured.End != CaptureEnd.Clean) Log(captured.End == CaptureEnd.TimedOut ? "microphone_stop_timeout" : "microphone_stop_failed", captured.Error ?? new IOException());
+            var audio = captured.Wav;
             if (recordingStart?.StopCue == true) { try { stopCue?.Play(); } catch { } }
             recorder.Dispose();
             // One conversion, off the UI thread: the speech check judges exactly the 16 kHz mono the engine hears.
