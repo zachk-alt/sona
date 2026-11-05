@@ -18,6 +18,8 @@ internal sealed class Transcriber : IDisposable
     private ParakeetRecognizer? parakeet;
     private readonly ParakeetHealth parakeetHealth = new();
     public ParakeetHealth Health => parakeetHealth;
+    /// A load, warm-up, release or overrun decode holds Parakeet; a dictation now runs on Whisper.
+    internal bool ParakeetBusy => parakeetGate.Busy;
 
     /// A WAV recording, through the one conversion both engines share.
     public Task<Transcript> TranscribeAsync(byte[] recording, SpeechRoute route, CancellationToken cancellation) =>
@@ -47,15 +49,26 @@ internal sealed class Transcriber : IDisposable
         return new(await TranscribeAsync(samples, route.WhisperModelPath, route.WhisperLanguage, cancellation), SpeechEngine.Whisper);
     }
 
-    /// Loads Parakeet ahead of the first dictation so that dictation does not wait for it. A failure is logged and
-    /// marks the folder failed, so English keeps running on Whisper.
+    /// Loads and warms Parakeet ahead of the first dictation, off the UI thread, so that dictation does not wait for
+    /// it. A load failure is logged and marks the folder failed, so English keeps running on Whisper.
     public Task PreloadParakeetAsync(string folder) => Task.Run(async () =>
     {
         if (!parakeetHealth.ShouldTry(folder)) return;
         await parakeetGate.RunAsync(() =>
         {
-            try { Load(folder); }
-            catch (ParakeetLoadException e) { App.Log(SpeechEngines.ParakeetLoadFailed, e.InnerException ?? e); }
+            ParakeetRecognizer engine;
+            try { engine = Load(folder); }
+            catch (ParakeetLoadException e) { App.Log(SpeechEngines.ParakeetLoadFailed, e.InnerException ?? e); return; }
+            // One short silent decode, like the Mac's load, so the first dictation does not pay for ONNX Runtime's
+            // first-run setup. A failure here drops the recognizer the same way a failed dictation decode does.
+            try { engine.Transcribe(new float[SpeechAudio.SampleRate]); }
+            catch (Exception e)
+            {
+                App.Log(SpeechEngines.ParakeetDecodeFailed, e);
+                parakeetHealth.DecodeFailed(folder);
+                try { engine.Dispose(); } catch { }
+                parakeet = null;
+            }
         });
     });
 

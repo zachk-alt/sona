@@ -134,6 +134,8 @@ internal static class WindowsSelfTest
             }
             else checks["speech_and_bridge_runtime"] = "skipped: no --fixture path supplied";
             await TestOwnedWindowAsync(checks);
+            // Pipeline parity checks (0.4.0 parity pass), after every existing check. See TestPipelineAsync.
+            await TestPipelineAsync(checks, output, fixture);
         }
         catch (Exception e) { failure = e.GetType().Name + ": " + e.Message; }
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
@@ -326,5 +328,52 @@ internal static class WindowsSelfTest
             if (touchedClipboard) { try { if (oldClipboard != null) Clipboard.SetDataObject(oldClipboard, true); else Clipboard.Clear(); } catch { } }
             panel.HideNow(); panel.Close(); window.Close();
         }
+    }
+
+    // ---- Pipeline parity checks (0.4.0 parity pass) ----
+    // Windows-only proof for the dictation pipeline changes whose rules Sona.Core.Tests covers off Windows: the shared
+    // 16 kHz conversion and speech check on the fixture, a busy Parakeet sending the dictation to Whisper, the warmed
+    // first decode, and the bridge accepting strict mode. Runs after the existing checks; no microphone, no provider.
+    private static async Task TestPipelineAsync(Dictionary<string, object> checks, string output, string? fixture)
+    {
+        void Check(string name, bool value) { checks[name] = value; if (!value) throw new InvalidOperationException(name); }
+        if (fixture == null) { checks["pipeline_parity"] = "skipped: no --fixture path supplied"; return; }
+        byte[] fixtureBytes = await File.ReadAllBytesAsync(fixture);
+        long frames; int rate;
+        using (var reader = new WaveFileReader(new MemoryStream(fixtureBytes, false))) { rate = reader.WaveFormat.SampleRate; frames = reader.SampleCount; }
+        float[] samples = SpeechAudio.Mono16k(fixtureBytes);
+        Check("pipeline_shared_conversion_exact_length", samples.Length == (int)Math.Round(frames * (double)SpeechAudio.SampleRate / rate));
+        Check("pipeline_speech_check_on_engine_audio", SpeechActivity.Detect(samples, SpeechAudio.SampleRate) && !SpeechActivity.Detect(new float[SpeechAudio.SampleRate * 2], SpeechAudio.SampleRate));
+        string models = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(output))!, "models");
+        string englishModel = Path.Combine(models, SpeechModels.English.FileName), parakeetFolder = Path.Combine(models, SpeechModels.Parakeet.FolderName);
+        var route = new SpeechRoute(englishModel, SpeechModels.WhisperLanguage(SpeechModels.English, "en"), parakeetFolder);
+        using var transcriber = new Transcriber();
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+        // A dictation that finds Parakeet held (here by its launch load and warm-up) runs on Whisper, never queues.
+        var preload = transcriber.PreloadParakeetAsync(parakeetFolder);
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        while (!transcriber.ParakeetBusy && !preload.IsCompleted && watch.Elapsed < TimeSpan.FromSeconds(5)) await Task.Delay(10);
+        if (transcriber.ParakeetBusy)
+        {
+            watch.Restart();
+            var busy = await transcriber.TranscribeAsync(samples, route, cancellation.Token, null);
+            checks["pipeline_busy_whisper_seconds"] = Math.Round(watch.Elapsed.TotalSeconds, 2);
+            Check("pipeline_busy_parakeet_runs_whisper", busy.Engine == SpeechEngine.Whisper && busy.Text.ToLowerInvariant().Contains("country"));
+        }
+        else checks["pipeline_busy_parakeet_runs_whisper"] = "skipped: the preload finished before the check could see it";
+        await preload;
+        watch.Restart();
+        var warmed = await transcriber.TranscribeAsync(samples, route, cancellation.Token, null);
+        checks["pipeline_first_decode_after_warmup_seconds"] = Math.Round(watch.Elapsed.TotalSeconds, 2);
+        Check("pipeline_warmed_parakeet_first_decode", warmed.Engine == SpeechEngine.Parakeet && warmed.Text.ToLowerInvariant().Contains("country"));
+        // The bridge takes the strict mode Windows now sends for code editors and terminals.
+        string bridge = Path.Combine(AppContext.BaseDirectory, "bridge", "sona-cleanup.mjs");
+        string config = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(output))!, "selftest-pipeline-ai.json");
+        await File.WriteAllTextAsync(config, "{\"ai\":{\"provider\":\"none\"}}");
+        string node = Path.Combine(AppContext.BaseDirectory, "runtime", "node", "node.exe");
+        if (!File.Exists(node)) node = "node.exe";
+        const string command = "git status --short";
+        var strict = await BoundedProcess.RunAsync(node, [bridge, "--request", "--config", config], BridgeProtocol.Dictate(command, true, CleanupModes.ForProcess("WindowsTerminal.exe")), TimeSpan.FromSeconds(10));
+        Check("pipeline_strict_mode_request_accepted", CleanupModes.ForProcess("WindowsTerminal.exe") == CleanupMode.Strict && BridgeProtocol.DictationText(strict, "FAIL") == command);
     }
 }
