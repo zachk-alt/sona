@@ -49,6 +49,8 @@ internal sealed class App : Application
     private string latest = "";
     // Numbers each dictation, and names the one whose text is in latest, so a late result never replaces newer text.
     private int session, deliveredSession;
+    // Strict cleanup for code editors and terminals, from the app focused when the dictation started.
+    private CleanupMode sessionMode;
     private string? sessionFailure;
     private System.Media.SoundPlayer? startCue, stopCue;
 
@@ -298,6 +300,7 @@ internal sealed class App : Application
                     : "Place the cursor in an editable, non-password text field, then tap your shortcut.");
                 return;
             }
+            sessionMode = CleanupModes.ForProcess(ProcessName(target.Process));
             recordingStart = new RecordingStart(); recordingWindow = target.Window;
             recorder.Start(settings.MicrophoneId); recording = true;
             firstAudio.Interval = DictationDeadlines.FirstAudio; firstAudio.Start();
@@ -335,7 +338,7 @@ internal sealed class App : Application
             latest = text; deliveredSession = id;
             // Snippets run inside the bridge before optional cleanup, including when cleanup is off.
             string raw = text;
-            text = BridgeProtocol.DictationText(await RequestAsync(BridgeProtocol.Dictate(raw, settings.CleanupEnabled), operation.Token), raw);
+            text = BridgeProtocol.DictationText(await RequestAsync(BridgeProtocol.Dictate(raw, settings.CleanupEnabled, sessionMode), operation.Token), raw);
             operation.Token.ThrowIfCancellationRequested(); latest = text;
             if (target != null) selectionSession = await UiaSession.PrepareCorrectionAsync(settings.AutoAddToDictionary, target);
             bool pasted = target != null && await TextInsertion.PasteAsync(target, text);
@@ -379,6 +382,11 @@ internal sealed class App : Application
         latest = text; deliveredSession = id;
         // Only while nothing newer owns the panel.
         if (!busy) ShowPanel(() => { if (panel != null) panel.ShowError("Text is ready in Copy last dictation."); else Notify("Text is ready in Copy last dictation."); });
+    }
+    private static string? ProcessName(uint id)
+    {
+        try { using var process = Process.GetProcessById((int)id); return process.ProcessName; }
+        catch (Exception e) when (e is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception) { return null; }
     }
     private static bool SpeechRuntimeFailed(Exception e) =>
         e is DllNotFoundException or TypeInitializationException ||

@@ -688,6 +688,16 @@ clean.Write(spoken, spoken.Length); clean.Stopped(null);
 var cleanResult = await clean.FinishAsync(TimeSpan.FromSeconds(1));
 Check(cleanResult.End == CaptureEnd.Clean && cleanResult.Error == null && SpeechAudio.Mono16k(cleanResult.Wav).Length == 16000, "a clean stop returns the whole recording");
 Check(DictationDeadlines.StopGrace == TimeSpan.FromMilliseconds(120), "the stop press keeps 120 ms of audio, the Mac's stopGrace");
+
+// Strict cleanup for code editors and terminals (parity P-F12), the Mac's strictModeBundleIDs as process names.
+Check(new[] { "Code.exe", "Cursor.exe", "WindowsTerminal.exe", "OpenConsole.exe", "powershell.exe", "pwsh.exe", "cmd.exe", "wezterm-gui.exe", "alacritty.exe", "idea64.exe", "devenv.exe", "sublime_text.exe", "Zed.exe", "pycharm64.exe", "rider64.exe", "conhost.exe" }
+    .All(name => CleanupModes.ForProcess(name) == CleanupMode.Strict), "code editors and terminals get strict cleanup");
+Check(CleanupModes.ForProcess("code") == CleanupMode.Strict && CleanupModes.ForProcess("WINDOWSTERMINAL.EXE") == CleanupMode.Strict, "process names match with or without .exe, in any case");
+Check(new[] { "WINWORD.EXE", "notepad.exe", "chrome.exe", "msedge", "Codex.exe", "", null }.All(name => CleanupModes.ForProcess(name) == CleanupMode.Prose), "other apps and unreadable processes get prose");
+using (var strictRequest = System.Text.Json.JsonDocument.Parse(BridgeProtocol.Dictate("git status", true, CleanupMode.Strict)))
+using (var proseRequest = System.Text.Json.JsonDocument.Parse(BridgeProtocol.Dictate("hello there", false)))
+    Check(strictRequest.RootElement.GetProperty("mode").GetString() == "strict" && strictRequest.RootElement.GetProperty("cleanupEnabled").GetBoolean()
+        && proseRequest.RootElement.GetProperty("mode").GetString() == "prose" && proseRequest.RootElement.GetProperty("operation").GetString() == "dictate", "the dictate request carries the cleanup mode");
 Console.WriteLine($"{tests} checks passed.");
 return 0;
 

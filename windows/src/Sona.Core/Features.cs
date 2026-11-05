@@ -75,7 +75,8 @@ public static class FeatureConfig
 
 public static class BridgeProtocol
 {
-    public static string Dictate(string raw, bool cleanup) => JsonSerializer.Serialize(new { version = 1, operation = "dictate", transcript = raw, mode = "prose", cleanupEnabled = cleanup });
+    public static string Dictate(string raw, bool cleanup) => Dictate(raw, cleanup, CleanupMode.Prose);
+    public static string Dictate(string raw, bool cleanup, CleanupMode mode) => JsonSerializer.Serialize(new { version = 1, operation = "dictate", transcript = raw, mode = mode == CleanupMode.Strict ? "strict" : "prose", cleanupEnabled = cleanup });
     public static string Rewrite(string selection, string instruction) => JsonSerializer.Serialize(new { version = 1, operation = "rewrite", selection, instruction });
     public static string Assist(string context) => JsonSerializer.Serialize(new { version = 1, operation = "snippet_assist", context });
     public static BridgeReply Parse(ProcessResult result, string operation, string? originalSelection = null, string? context = null)
@@ -118,6 +119,34 @@ public static class BridgeProtocol
         }
         bool Body(string text) => text.Any(c => !char.IsWhiteSpace(c) && c != '\uFEFF');
         return Body(original) && Body(result) && Outer(original) == Outer(result);
+    }
+}
+
+public enum CleanupMode { Prose, Strict }
+
+/// Code editors and terminals get the bridge's strict cleanup, because the text is probably a command or code, where
+/// prose cleanup (capitals, punctuation, dropped fillers) breaks flags and identifiers. The Mac's strictModeBundleIDs
+/// (Config.swift) as Windows process names, picked from the focused process when the dictation starts.
+public static class CleanupModes
+{
+    public static readonly IReadOnlySet<string> StrictProcesses = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        // Terminals and shells.
+        "WindowsTerminal", "OpenConsole", "conhost", "powershell", "pwsh", "cmd", "wezterm-gui", "alacritty", "Hyper", "Warp",
+        // Code editors.
+        "Code", "Code - Insiders", "Cursor", "devenv", "sublime_text", "Zed",
+        // JetBrains IDEs and Android Studio.
+        "idea64", "pycharm64", "webstorm64", "phpstorm64", "clion64", "rider64", "goland64", "rubymine64", "datagrip64",
+        "rustrover64", "dataspell64", "aqua64", "studio64",
+    };
+
+    /// A process name with or without ".exe"; an unknown or unreadable process gets prose.
+    public static CleanupMode ForProcess(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return CleanupMode.Prose;
+        name = name.Trim();
+        if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) name = name[..^4];
+        return StrictProcesses.Contains(name) ? CleanupMode.Strict : CleanupMode.Prose;
     }
 }
 
