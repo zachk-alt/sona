@@ -35,6 +35,10 @@ internal sealed class App : Application
     private readonly Transcriber transcriber = new();
     private readonly HttpClient http = new() { Timeout = TimeSpan.FromMinutes(8) };
     private readonly DispatcherTimer limit = new();
+    // Shows the recording panel when the first live audio is late (DictationDeadlines.FirstAudio).
+    private readonly DispatcherTimer firstAudio = new();
+    private RecordingStart? recordingStart;
+    private nint recordingWindow;
     private CancellationTokenSource? operation;
     private FocusTarget? target;
     private UiaSession? selectionSession, learningSession;
@@ -127,6 +131,16 @@ internal sealed class App : Application
         }
         // Like the Mac, the panel follows the 48 voice bands, only while dictating.
         recorder.Spectrum += bands => Dispatcher.BeginInvoke(() => { if (recording) panel?.SetSpectrum(bands); });
+        // The chime, the panel's Recording state and the tray icon follow the microphone's first live audio.
+        recorder.FirstAudio += generation => Dispatcher.BeginInvoke(() =>
+        {
+            if (recording && generation == recorder.Generation) ShowRecording(recordingStart?.AudioArrived() ?? RecordingCue.None);
+        });
+        firstAudio.Tick += (_, _) =>
+        {
+            firstAudio.Stop();
+            if (recording) ShowRecording(recordingStart?.DeadlinePassed() ?? RecordingCue.None);
+        };
         recorder.UnexpectedStop += e => Dispatcher.BeginInvoke(async () =>
         {
             try { await CancelAsync(); Notify("The microphone stopped. Check your selected device and Windows microphone access."); }
@@ -275,12 +289,10 @@ internal sealed class App : Application
                     : "Place the cursor in an editable, non-password text field, then tap your shortcut.");
                 return;
             }
-            recorder.Start(settings.MicrophoneId); recording = true; if (tray != null) tray.Icon = activeIcon;
-            var window = target.Window;
-            ShowPanel(() => panel?.Recording(window));
-            try { startCue?.Play(); } catch { }
+            recordingStart = new RecordingStart(); recordingWindow = target.Window;
+            recorder.Start(settings.MicrophoneId); recording = true;
+            firstAudio.Interval = DictationDeadlines.FirstAudio; firstAudio.Start();
             limit.Interval = TimeSpan.FromSeconds(settings.MaximumRecordingSeconds); limit.Start();
-            if (tray != null) tray.Text = "Sona: recording";
         }
         // Shown in the panel, like the Mac.
         catch { sessionFailure = "The microphone is unavailable or switching. Try again."; Reset(); }
@@ -288,12 +300,12 @@ internal sealed class App : Application
     private async Task FinishAsync()
     {
         if (!recording) return;
-        recording = false; limit.Stop();
+        recording = false; limit.Stop(); firstAudio.Stop();
         try
         {
             ShowPanel(() => panel?.Processing()); if (tray != null) tray.Text = "Sona: processing";
             var audio = await recorder.StopAsync();
-            try { stopCue?.Play(); } catch { }
+            if (recordingStart?.StopCue == true) { try { stopCue?.Play(); } catch { } }
             recorder.Dispose();
             // One conversion, off the UI thread: the speech check judges exactly the 16 kHz mono the engine hears.
             var samples = await Task.Run(() => SpeechAudio.Mono16k(audio));
@@ -353,6 +365,7 @@ internal sealed class App : Application
         var session = selectionSession; selectionSession = null; target = null;
         Guard(() => session?.Dispose());
         Guard(limit.Stop);
+        Guard(firstAudio.Stop);
         Guard(recorder.Dispose);
         if (failure != null && !quitting)
         {
@@ -364,6 +377,15 @@ internal sealed class App : Application
         Guard(() => done?.Dispose());
         Guard(() => { if (tray != null) { tray.Text = "Sona"; tray.Icon = idleIcon; } });
         Guard(() => hotkey?.Rearm());
+    }
+    private void ShowRecording(RecordingCue cue)
+    {
+        // The chime first, like the Mac: it marks the microphone as live.
+        if (cue.HasFlag(RecordingCue.Chime)) { try { startCue?.Play(); } catch { } }
+        if (!cue.HasFlag(RecordingCue.Show)) return;
+        if (tray != null) { tray.Icon = activeIcon; tray.Text = "Sona: recording"; }
+        var window = recordingWindow;
+        ShowPanel(() => panel?.Recording(window));
     }
     // The panel is feedback only: a fault in it is logged and the panel hidden, and the dictation goes on.
     private void ShowPanel(Action show)

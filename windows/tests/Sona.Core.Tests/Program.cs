@@ -602,6 +602,26 @@ Check(stereoWav.Length == 32000 && Math.Abs(ToneDb(stereoWav, 1000)) < 0.1, "a 1
 float[] Hiss(int n, double dbfs) { var noise = WhiteNoise(n, dbfs); var high = new float[n]; for (int i = 1; i < n - 1; i++) high[i] = (noise[i] - 0.5f * (noise[i - 1] + noise[i + 1])) * 0.8165f; return high; }
 var hissy = Mix(Syllables(Rate, 2.0, -40), Hiss(Rate * 2, -30));
 Check(SpeechActivity.Detect(SpeechAudio.Mono16k(hissy, Rate, 1), 16000), "soft speech under loud hiss above 8 kHz is speech on the 16 kHz mono the engine hears");
+
+// Recording start (parity P-F6, UI-F2): the chime, panel and tray icon wait for live audio; 1.5 s shows the panel alone.
+Check(DictationDeadlines.FirstAudio == TimeSpan.FromSeconds(1.5), "first audio deadline matches the Mac's 1.5 s");
+var prompt = new RecordingStart();
+Check(!prompt.Shown && !prompt.StopCue, "nothing is shown or chimed before live audio");
+Check(prompt.AudioArrived() == (RecordingCue.Show | RecordingCue.Chime) && prompt.StopCue, "live audio plays the chime and shows recording");
+Check(prompt.AudioArrived() == RecordingCue.None && prompt.DeadlinePassed() == RecordingCue.None, "live audio and the deadline act once");
+var lateMic = new RecordingStart();
+Check(lateMic.DeadlinePassed() == RecordingCue.Show && !lateMic.StopCue, "no live audio by the deadline shows the panel without the chime");
+Check(lateMic.AudioArrived() == RecordingCue.Chime && lateMic.StopCue, "audio after the deadline still chimes, and then the stop cue plays");
+var neverLive = new RecordingStart(); neverLive.DeadlinePassed();
+Check(!neverLive.StopCue, "no stop cue when the start cue never played");
+var live = new LiveAudio(48000, 2); int fired = 0;
+for (int i = 0; i < 48000 * 2; i++) if (live.Add(0)) fired++;
+Check(fired == 0 && !live.Heard, "zeroed packets (NAudio's silent flag) are not live audio");
+for (int i = 0; i < 48000 * 2; i++) if (live.Add(1e-6f)) fired++;
+Check(fired == 0, "a -120 dBFS hum is still digital silence");
+var quiet = PinkNoise(48000 * 2, -70); int at = -1; live = new LiveAudio(48000, 2);
+for (int i = 0; i < quiet.Length; i++) if (live.Add(quiet[i])) { fired++; if (at < 0) at = i; }
+Check(fired == 1 && live.Heard && at == 48 * 30 * 2 - 1, "the first 30 ms window of real room sound is live, once");
 Console.WriteLine($"{tests} checks passed.");
 return 0;
 

@@ -18,6 +18,10 @@ internal sealed class AudioRecorder : IDisposable
     private readonly float[] ring = new float[PanelSpectrum.AnalysisFrames], ordered = new float[PanelSpectrum.AnalysisFrames];
     private int ringNext, ringFilled, sinceSpectrum;
     public event Action<Exception?>? UnexpectedStop;
+    /// The first live audio of a capture (Sona.Core.LiveAudio), raised once per Start with that capture's number.
+    public event Action<int>? FirstAudio;
+    public int Generation { get; private set; }
+    private LiveAudio? live;
     private bool stopping;
     public static List<(string Id, string Name)> Devices()
     {
@@ -34,6 +38,7 @@ internal sealed class AudioRecorder : IDisposable
         using var enumerator = new MMDeviceEnumerator();
         device = string.IsNullOrEmpty(deviceId) ? enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Communications) : enumerator.GetDevice(deviceId);
         capture = new WasapiCapture(device);
+        lock (gate) { Generation++; live = new LiveAudio(capture.WaveFormat.SampleRate, capture.WaveFormat.Channels); }
         memory = new MemoryStream();
         writer = new WaveFileWriter(memory, capture.WaveFormat);
         stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -45,10 +50,13 @@ internal sealed class AudioRecorder : IDisposable
     {
         float peak = 0;
         float[]? bands = null;
+        bool firstLive = false;
+        int generation;
         lock (gate)
         {
             // A capture disposed in the background must never write into the next session.
             if (writer == null || capture == null || !ReferenceEquals(sender, capture)) return;
+            generation = Generation;
             writer.Write(e.Buffer, 0, e.BytesRecorded);
             var format = capture.WaveFormat;
             bool floating = format.Encoding == WaveFormatEncoding.IeeeFloat ||
@@ -60,6 +68,7 @@ internal sealed class AudioRecorder : IDisposable
                     bytes == 4 ? BitConverter.ToInt32(e.Buffer, i) / 2147483648f :
                     bytes == 3 ? ((e.Buffer[i] << 8) | (e.Buffer[i + 1] << 16) | (e.Buffer[i + 2] << 24)) / 2147483648f : 0;
                 bool finite = float.IsFinite(sample);
+                if (live?.Add(sample) == true) firstLive = true;
                 if (index % channels == 0)
                 {
                     // First channel only, like the Mac tap.
@@ -82,6 +91,7 @@ internal sealed class AudioRecorder : IDisposable
                 PanelSpectrum.Analyze(ordered, format.SampleRate, bands);
             }
         }
+        if (firstLive) FirstAudio?.Invoke(generation);
         Level?.Invoke(Math.Min(peak, 1));
         if (bands != null) Spectrum?.Invoke(bands);
     }
