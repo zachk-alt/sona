@@ -122,6 +122,31 @@ public static class BridgeProtocol
     }
 }
 
+/// AI cleanup time limits, matched to the Mac. The bridge stops a slow provider at ai.timeoutMs and returns the raw
+/// transcript; the process around it gets that plus 2 s to report, at most 35 s (AppState.swift, BridgeOperations).
+public static class CleanupTimeouts
+{
+    /// The Mac's ai.timeoutMs default (Config.swift), written when Settings saves a configuration without one.
+    public const int DefaultMs = 12000;
+    /// What the bridge itself uses when ai.timeoutMs is missing (cleanup.mjs), so the cap never undercuts it.
+    public const int BridgeDefaultMs = 15000;
+
+    public static TimeSpan ProcessCap(int? timeoutMs) => TimeSpan.FromSeconds(Math.Min(35, Math.Max(1, (timeoutMs ?? BridgeDefaultMs) / 1000.0 + 2)));
+
+    /// ai.timeoutMs from an ai.json document; null when the document, the field or its integer is missing.
+    public static int? Read(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            return document.RootElement.ValueKind == JsonValueKind.Object && document.RootElement.TryGetProperty("ai", out var ai) && ai.ValueKind == JsonValueKind.Object
+                && ai.TryGetProperty("timeoutMs", out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out int ms) ? ms : null;
+        }
+        catch (JsonException) { return null; }
+    }
+}
+
 public enum CleanupMode { Prose, Strict }
 
 /// Code editors and terminals get the bridge's strict cleanup, because the text is probably a command or code, where

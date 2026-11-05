@@ -226,7 +226,7 @@ internal sealed class App : Application
             ai.Remove("executable"); ai.Remove("args");
         }
         ai["provider"] = provider; ai["model"] = string.IsNullOrEmpty(model) ? "economy" : model;
-        ai["timeoutMs"] ??= 15000; document["ai"] = ai; document["vocabulary"] = JsonSerializer.SerializeToNode(FeatureConfig.Vocabulary(vocabulary));
+        ai["timeoutMs"] ??= CleanupTimeouts.DefaultMs; document["ai"] = ai; document["vocabulary"] = JsonSerializer.SerializeToNode(FeatureConfig.Vocabulary(vocabulary));
         document["snippets"] = JsonSerializer.SerializeToNode(FeatureConfig.Snippets(snippets), SettingsStore.JsonOptions);
         var appDocument = SettingsStore.MergeDocument(ConfigPath, next);
         using var key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run");
@@ -499,7 +499,11 @@ internal sealed class App : Application
         string bundledNode = Path.Combine(AppContext.BaseDirectory, "runtime", "node", "node.exe");
         string node = settings.NodePath ?? (File.Exists(bundledNode) ? bundledNode : "node.exe");
         if (!File.Exists(bridge)) return new(false, "", "bridge_missing");
-        return await BoundedProcess.RunAsync(node, [bridge, "--request", "--config", configOverride ?? AiPath], request, TimeSpan.FromSeconds(35), cancellation);
+        string config = configOverride ?? AiPath;
+        // The process cap follows the configured cleanup timeout, as on the Mac, instead of a fixed 35 s.
+        int? timeoutMs;
+        try { timeoutMs = CleanupTimeouts.Read(File.ReadAllText(config)); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { timeoutMs = null; }
+        return await BoundedProcess.RunAsync(node, [bridge, "--request", "--config", config], request, CleanupTimeouts.ProcessCap(timeoutMs), cancellation);
     }
     private async Task<BridgeReply> AssistAsync(string context, CancellationToken cancellation)
         => BridgeProtocol.Parse(await RequestAsync(BridgeProtocol.Assist(context), cancellation), "snippet_assist", context: context);

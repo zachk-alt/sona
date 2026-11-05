@@ -725,6 +725,14 @@ Check(slowLoad.Outcome == EngineOutcome.Completed && slowLoad.Value == "loaded",
 var hungLoad = await engineGate.RunBoundedAsync(decoding => { Thread.Sleep(400); decoding(); return "never"; }, TimeSpan.FromMilliseconds(100), TimeSpan.FromSeconds(5), CancellationToken.None);
 Check(hungLoad.Outcome == EngineOutcome.TimedOut, "a load past its own allowance times out too");
 for (int i = 0; i < 100 && engineGate.Busy; i++) await Task.Delay(10);
+
+// Cleanup timeouts (parity P-F13): the Mac's 12 s default, and the process cap derived from it.
+Check(CleanupTimeouts.DefaultMs == 12000, "the cleanup timeout default matches the Mac's 12 s");
+Check(CleanupTimeouts.ProcessCap(12000) == TimeSpan.FromSeconds(14) && CleanupTimeouts.ProcessCap(30000) == TimeSpan.FromSeconds(32) && CleanupTimeouts.ProcessCap(250) == TimeSpan.FromSeconds(2.25), "the bridge process gets its timeout plus 2 s, like the Mac");
+Check(CleanupTimeouts.ProcessCap(100000) == TimeSpan.FromSeconds(35) && CleanupTimeouts.ProcessCap(-5000) == TimeSpan.FromSeconds(1), "the process cap stays between 1 s and 35 s");
+Check(CleanupTimeouts.ProcessCap(null) == TimeSpan.FromSeconds(17), "a configuration without timeoutMs never undercuts the bridge's own 15 s default");
+Check(CleanupTimeouts.Read("{\"ai\":{\"provider\":\"claude\",\"timeoutMs\":9000}}") == 9000 && CleanupTimeouts.Read("{\"ai\":{\"provider\":\"none\"}}") == null
+    && CleanupTimeouts.Read("{\"ai\":{\"timeoutMs\":\"9000\"}}") == null && CleanupTimeouts.Read("not json") == null && CleanupTimeouts.Read("[]") == null && CleanupTimeouts.Read(null) == null, "timeoutMs is read only from a well-formed ai object");
 Console.WriteLine($"{tests} checks passed.");
 return 0;
 
